@@ -61,7 +61,7 @@ fn identitybundle_drop_zeroizes_private_key() {
     let (user_id, _kp_bytes, bundle_bytes) =
         generate_identity("zeroize-probe".to_string(), now_secs()).expect("generate_identity");
     assert_eq!(user_id, "zeroize-probe");
-    let bundle: IdentityBundle = serde_json::from_slice(&bundle_bytes).expect("deserialize");
+    let bundle = IdentityBundle::from_slice(&bundle_bytes).expect("deserialize");
     let mut guard = ManuallyDrop::new(bundle);
     // Force a known non-zero byte so a false-pass (an already-zero key) can't hide a real bug.
     guard.private_key[0] = guard.private_key[0].wrapping_add(1).max(1);
@@ -124,13 +124,13 @@ fn mlssigner_key_wipes_on_drop() {
 fn zeroizing_json_output_wipes_on_drop() {
     let (_, _, bundle_bytes) = generate_identity("zeroizing-json-probe".to_string(), now_secs())
         .expect("generate_identity");
-    let mut bundle: IdentityBundle = serde_json::from_slice(&bundle_bytes).expect("deserialize");
+    let mut bundle = IdentityBundle::from_slice(&bundle_bytes).expect("deserialize");
     // Force a known, distinctive byte pair so a false-pass (an already-zero key, or a
     // coincidental zero run) can't hide a real bug.
     bundle.private_key[0] = 0xAB;
     bundle.private_key[1] = 0xCD;
 
-    let serialized: zeroize::Zeroizing<Vec<u8>> = zeroizing_json(&bundle).expect("serialize");
+    let serialized: zeroize::Zeroizing<Vec<u8>> = bundle.to_zeroizing_json().expect("serialize");
     // `serde_json` encodes `Vec<u8>` as a JSON array of decimal numbers, not raw bytes - confirm
     // the fixture's marker (171, 205) actually landed in the buffer's ASCII text before proving
     // the buffer gets wiped.
@@ -189,7 +189,7 @@ fn group_lifecycle_round_trips_after_zeroize_refactor() {
     let (group_state_a4, _remove_commit) =
         remove_member_by_credential(group_state_a3, bundle_a, "bob".to_string())
             .expect("remove_member_by_credential");
-    let state: GroupState = serde_json::from_slice(&group_state_a4).expect("deserialize");
+    let state = GroupState::from_slice(&group_state_a4).expect("deserialize");
     assert_eq!(state.group_id, b"test-group");
 }
 
@@ -273,8 +273,7 @@ fn regenerate_key_package_preserves_identity() {
     assert_eq!(user_id, "carol");
     assert!(!new_kp_bytes.is_empty());
 
-    let new_bundle: IdentityBundle =
-        serde_json::from_slice(&new_bundle_bytes).expect("deserialize new bundle");
+    let new_bundle = IdentityBundle::from_slice(&new_bundle_bytes).expect("deserialize new bundle");
     assert_eq!(new_bundle.user_id, "carol");
     assert!(!new_bundle.private_key.is_empty());
 }
@@ -418,7 +417,7 @@ fn mimi_group_create_add_welcome_round_trips_after_zeroize_refactor() {
 
     let group_state_b = mimi_process_welcome(welcome, bundle_b, Vec::new(), String::new())
         .expect("mimi_process_welcome");
-    let state_b: GroupState = serde_json::from_slice(&group_state_b).expect("deserialize");
+    let state_b = GroupState::from_slice(&group_state_b).expect("deserialize");
     assert_eq!(state_b.group_id, b"mimi-test-group");
 }
 
@@ -482,13 +481,13 @@ mod suite_gate {
             user_id: user_id.to_string(),
             storage_map,
         };
-        (kp_bytes, serde_json::to_vec(&bundle).unwrap())
+        (kp_bytes, bundle.to_zeroizing_json().unwrap().to_vec())
     }
 
     /// Create a group under an ARBITRARY ciphersuite (a foreign peer's group). Mirrors
     /// `create_group` but sets the suite explicitly (the real fn relies on the 0x0001 default).
     fn foreign_create_group(group_id: &str, bundle_bytes: &[u8], suite: Ciphersuite) -> Vec<u8> {
-        let mut identity: IdentityBundle = serde_json::from_slice(bundle_bytes).unwrap();
+        let mut identity = IdentityBundle::from_slice(bundle_bytes).unwrap();
         let provider = OpenMlsRustCrypto::default();
         let group_config = MlsGroupCreateConfig::builder()
             .ciphersuite(suite)
@@ -526,7 +525,7 @@ mod suite_gate {
             group_id: group.group_id().to_vec(),
             storage_map,
         };
-        serde_json::to_vec(&state).unwrap()
+        state.to_zeroizing_json().unwrap().to_vec()
     }
 
     /// Raw, UNGATED add - builds a Welcome by adding a foreign KeyPackage to a foreign group via
@@ -538,8 +537,8 @@ mod suite_gate {
         bundle_bytes: &[u8],
         key_package_bytes: Vec<u8>,
     ) -> Vec<u8> {
-        let mut state: GroupState = serde_json::from_slice(&group_state_bytes).unwrap();
-        let mut identity: IdentityBundle = serde_json::from_slice(bundle_bytes).unwrap();
+        let mut state = GroupState::from_slice(&group_state_bytes).unwrap();
+        let mut identity = IdentityBundle::from_slice(bundle_bytes).unwrap();
         let provider = OpenMlsRustCrypto::default();
         {
             let mut values = provider.storage().values.write().unwrap();

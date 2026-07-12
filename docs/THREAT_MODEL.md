@@ -86,15 +86,17 @@ unwiped. Two residuals remain, disclosed rather than closed:
   internal buffer before it ever reaches `Zeroizing::new`. Both happen inside `serde_json::
   to_vec`'s own call frame. Open item: a custom `serde_json::to_writer` sink writing into a
   buffer this crate owns and wipes could close it.
-- **Convention, not construction.** `GroupState` and `IdentityBundle` stay `pub` with
-  `#[derive(Serialize)]` (this crate's own module doc states other consumers reuse them
-  directly), so a caller that serializes either type with `serde_json::to_vec`, or any other
-  `Serialize`-based encoder, without going through `zeroizing_json` gets an unwiped buffer. The
-  wipe-on-serialize property holds for this crate's own production call sites because every one
-  of them routes through `zeroizing_json`; it is not a guarantee the types themselves enforce.
-  Closing that by construction (an opaque type, a private `Serialize`, or an inherent
-  `Zeroizing`-returning serialize method replacing the public derive) is a compat-breaking change
-  to this crate's public API and remains an open, deferred decision.
+- **Construction, not convention.** `GroupState` and `IdentityBundle` carry no `Serialize`/
+  `Deserialize` implementation of their own. The only way to reach their wire form is the
+  inherent `to_zeroizing_json`/`from_slice` pair, which routes every serialize through
+  `zeroizing_json` over a module-private DTO - a caller cannot obtain an unwiped buffer with
+  `serde_json::to_vec` or any other `Serialize`-based encoder, because neither type implements
+  the trait those encoders require. This is a type-level guarantee, not a call-site convention:
+  the compiler rejects a bypass attempt at build time. Compat note: this removed the types'
+  public `Serialize`/`Deserialize` derive, an API break for any external consumer constructing
+  or encoding these types directly - none exists today (every current call site is internal to
+  this crate; the FRB boundary in the consuming client passes raw `Vec<u8>`, never these Rust
+  types).
 
 ### A tampered legacy-format blob
 **Capability assumed:** the ability to modify a blob previously encrypted in this crate's

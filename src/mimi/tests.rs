@@ -184,7 +184,7 @@ fn mimi_self_contained_welcome_round_trip() {
 /// constructing an external-sender-signed proposal directly against openmls's API. The "hub" is
 /// never a group member, so it has no `GroupState` of its own, only a signing identity.
 fn raw_signer_and_pubkey(bundle_bytes: &[u8]) -> (MlsSigner, SignaturePublicKey) {
-    let identity: IdentityBundle = serde_json::from_slice(bundle_bytes).expect("valid bundle");
+    let identity = IdentityBundle::from_slice(bundle_bytes).expect("valid bundle");
     let signer = MlsSigner {
         key: Zeroizing::new(identity.private_key.clone()),
         scheme: identity.signature_scheme,
@@ -200,7 +200,7 @@ fn raw_signer_and_pubkey(bundle_bytes: &[u8]) -> (MlsSigner, SignaturePublicKey)
 /// production code never needs to peek at the epoch from outside `mimi_accept_external_remove_proposal`
 /// itself).
 fn group_id_and_epoch(state_bytes: &[u8]) -> (GroupId, GroupEpoch) {
-    let state: GroupState = serde_json::from_slice(state_bytes).expect("valid state");
+    let state = GroupState::from_slice(state_bytes).expect("valid state");
     let provider = OpenMlsRustCrypto::default();
     {
         let mut values = provider.storage().values.write().unwrap();
@@ -258,7 +258,7 @@ fn hub_signed_remove_is_accepted_and_removes_the_member() {
     assert!(!commit_bytes.is_empty(), "must produce a real commit");
 
     let (_gid, _epoch2) = group_id_and_epoch(&new_alice_s);
-    let state: GroupState = serde_json::from_slice(&new_alice_s).expect("valid state");
+    let state = GroupState::from_slice(&new_alice_s).expect("valid state");
     let provider = OpenMlsRustCrypto::default();
     {
         let mut values = provider.storage().values.write().unwrap();
@@ -594,7 +594,7 @@ fn native_lane_group_refuses_any_external_proposal_structurally() {
 /// directly instead, exactly as `spec_capability_proof.rs` (the interop repo's sibling proof
 /// module) does for its own tests.
 fn signer_and_cwk(bundle_bytes: &[u8]) -> (MlsSigner, CredentialWithKey) {
-    let mut identity: IdentityBundle = serde_json::from_slice(bundle_bytes).expect("valid bundle");
+    let mut identity = IdentityBundle::from_slice(bundle_bytes).expect("valid bundle");
     let signer = MlsSigner {
         key: Zeroizing::new(std::mem::take(&mut identity.private_key)),
         scheme: identity.signature_scheme,

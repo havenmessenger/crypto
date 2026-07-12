@@ -2,8 +2,10 @@
 //! (`crate::mls::groups`, `crate::mimi`, `crate::identity`).
 //!
 //! These types are `pub` (not `pub(crate)`) because a consuming application reuses them
-//! directly - they are serde-serialized opaque value types, not app-binding types, so exposing
-//! them here does not require this crate to depend on any binding layer.
+//! directly - as opaque handles passed between this crate's own functions, not as bare
+//! serde types. Serialization is an inherent API (`to_zeroizing_json`/`from_slice`) over a
+//! module-private wire DTO, so a consumer cannot reach the plaintext bytes through any
+//! `Serialize`-based encoder except the one that wipes its own output on drop.
 
 pub mod groups;
 
@@ -20,7 +22,11 @@ use zeroize::{Zeroize, Zeroizing};
 /// inside the per-op `OpenMlsRustCrypto` provider is out of this crate's control - it is a
 /// fresh, single-op provider (see groups.rs/mimi/mod.rs module docs), not a long-lived
 /// process, but openmls does not zeroize its own `MemoryStorage` internally.
-#[derive(Serialize, Deserialize)]
+///
+/// Carries no `Serialize`/`Deserialize` impl of its own - the wire form is reached only
+/// through [`GroupState::to_zeroizing_json`]/[`GroupState::from_slice`], so every serialize
+/// of this type's plaintext fields is wrapped in `Zeroizing` by construction, not by the
+/// caller remembering to route through it.
 pub struct GroupState {
     pub group_id: Vec<u8>,
     pub storage_map: Vec<(Vec<u8>, Vec<u8>)>,
@@ -34,14 +40,51 @@ impl Drop for GroupState {
     }
 }
 
-/// Serde-only internal value type (never a Dart type). Carries opaque openmls
-/// fields (`KeyPackageBundle`, `SignatureScheme`) - FRB would auto-opaque these
-/// into unresolved bare type refs, which is why it never crosses the boundary.
+/// Borrowed wire shape for [`GroupState::to_zeroizing_json`] - serializes by reference so
+/// encoding never clones the plaintext `storage_map` bytes into a second, unwiped buffer.
+#[derive(Serialize)]
+struct GroupStateSerDto<'a> {
+    group_id: &'a [u8],
+    storage_map: &'a [(Vec<u8>, Vec<u8>)],
+}
+
+/// Owned wire shape for [`GroupState::from_slice`] - the only place this crate ever
+/// deserializes a `GroupState` from bytes.
+#[derive(Deserialize)]
+struct GroupStateDeDto {
+    group_id: Vec<u8>,
+    storage_map: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl GroupState {
+    /// Serialize into a self-wiping buffer. See [`zeroizing_json`] for the residuals this
+    /// still carries (reallocation during encode, the error-path gap).
+    pub fn to_zeroizing_json(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        zeroizing_json(&GroupStateSerDto {
+            group_id: &self.group_id,
+            storage_map: &self.storage_map,
+        })
+    }
+
+    /// Deserialize from the wire form `to_zeroizing_json` produces.
+    pub fn from_slice(bytes: &[u8]) -> anyhow::Result<Self> {
+        let dto: GroupStateDeDto = serde_json::from_slice(bytes)?;
+        Ok(Self {
+            group_id: dto.group_id,
+            storage_map: dto.storage_map,
+        })
+    }
+}
+
+/// Internal value type (never a Dart type). Carries opaque openmls fields
+/// (`KeyPackageBundle`, `SignatureScheme`) - FRB would auto-opaque these into unresolved
+/// bare type refs, which is why it never crosses the boundary.
 ///
 /// `private_key` is the Ed25519 MLS signing key; `storage_map` may carry the same
 /// ratchet-tree secrets as `GroupState` (populated on `process_welcome`). Both are
 /// wiped on drop - the same openmls-internal-copy bound noted on `GroupState` applies.
-#[derive(Serialize, Deserialize)]
+///
+/// Carries no `Serialize`/`Deserialize` impl of its own - see [`GroupState`]'s doc for why.
 pub struct IdentityBundle {
     pub key_package_bundle: KeyPackageBundle,
     pub private_key: Vec<u8>,
@@ -58,6 +101,58 @@ impl Drop for IdentityBundle {
         for (_, v) in &mut self.storage_map {
             v.zeroize();
         }
+    }
+}
+
+/// Borrowed wire shape for [`IdentityBundle::to_zeroizing_json`] - `key_package_bundle`
+/// and `signature_scheme` serialize by reference via serde's blanket `&T: Serialize`, so
+/// only the two plaintext-bearing fields need an explicit borrow.
+#[derive(Serialize)]
+struct IdentityBundleSerDto<'a> {
+    key_package_bundle: &'a KeyPackageBundle,
+    private_key: &'a [u8],
+    signature_scheme: &'a SignatureScheme,
+    public_key_bytes: &'a [u8],
+    user_id: &'a str,
+    storage_map: &'a [(Vec<u8>, Vec<u8>)],
+}
+
+/// Owned wire shape for [`IdentityBundle::from_slice`].
+#[derive(Deserialize)]
+struct IdentityBundleDeDto {
+    key_package_bundle: KeyPackageBundle,
+    private_key: Vec<u8>,
+    signature_scheme: SignatureScheme,
+    public_key_bytes: Vec<u8>,
+    user_id: String,
+    storage_map: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl IdentityBundle {
+    /// Serialize into a self-wiping buffer. See [`zeroizing_json`] for the residuals this
+    /// still carries (reallocation during encode, the error-path gap).
+    pub fn to_zeroizing_json(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+        zeroizing_json(&IdentityBundleSerDto {
+            key_package_bundle: &self.key_package_bundle,
+            private_key: &self.private_key,
+            signature_scheme: &self.signature_scheme,
+            public_key_bytes: &self.public_key_bytes,
+            user_id: &self.user_id,
+            storage_map: &self.storage_map,
+        })
+    }
+
+    /// Deserialize from the wire form `to_zeroizing_json` produces.
+    pub fn from_slice(bytes: &[u8]) -> anyhow::Result<Self> {
+        let dto: IdentityBundleDeDto = serde_json::from_slice(bytes)?;
+        Ok(Self {
+            key_package_bundle: dto.key_package_bundle,
+            private_key: dto.private_key,
+            signature_scheme: dto.signature_scheme,
+            public_key_bytes: dto.public_key_bytes,
+            user_id: dto.user_id,
+            storage_map: dto.storage_map,
+        })
     }
 }
 

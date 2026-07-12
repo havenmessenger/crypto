@@ -49,7 +49,7 @@ pub fn regenerate_key_package(
     // 1. Deserialize the existing bundle. All five private fields
     //    (key_package_bundle, private_key, signature_scheme,
     //    public_key_bytes, user_id) are preserved.
-    let mut old: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut old = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     // 2. Reconstruct the signer + credential from the existing
@@ -115,7 +115,7 @@ pub fn regenerate_key_package(
         storage_map,
     };
 
-    let new_bundle_bytes = crate::mls::zeroizing_json(&new_bundle)?;
+    let new_bundle_bytes = new_bundle.to_zeroizing_json()?;
 
     // `old` drops here (its private_key/public_key_bytes were taken above, leaving empty
     // placeholders; Drop still zeroizes whatever remains, e.g. old.storage_map, harmlessly).
@@ -129,7 +129,7 @@ pub fn regenerate_key_package(
 pub fn create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     // Wrap the owned input on entry (see regenerate_key_package's comment).
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -180,7 +180,7 @@ pub fn create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Result<V
         storage_map,
     };
 
-    let state_bytes = crate::mls::zeroizing_json(&state)?;
+    let state_bytes = state.to_zeroizing_json()?;
 
     Ok(state_bytes.to_vec())
 }
@@ -195,10 +195,10 @@ pub fn encrypt_message(
     // encrypted, not MLS key material.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -233,7 +233,7 @@ pub fn encrypt_message(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
 
     let ciphertext = message.tls_serialize_detached()?;
 
@@ -250,7 +250,7 @@ pub fn decrypt_message(
     // so it's wrapped and held (never read) purely for its wipe-on-drop side effect.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let _bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -290,7 +290,7 @@ pub fn decrypt_message(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
 
     Ok((new_group_state.to_vec(), content))
 }
@@ -311,10 +311,10 @@ pub fn add_member(
     // secret.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -372,7 +372,7 @@ pub fn add_member(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
 
     // Serialize Welcome as MlsMessageOut (wrapper)
     let welcome_bytes = welcome.tls_serialize_detached()?;
@@ -399,10 +399,10 @@ pub fn add_members_bulk(
     // secret.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -456,7 +456,7 @@ pub fn add_members_bulk(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
 
     let welcome_bytes = welcome.tls_serialize_detached()?;
     let combined_welcome = serde_json::to_vec(&(welcome_bytes, ratchet_tree_bytes))?;
@@ -480,10 +480,10 @@ pub fn remove_member_by_credential(
     // regenerate_key_package's comment).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -537,10 +537,7 @@ pub fn remove_member_by_credential(
     };
 
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((
-        crate::mls::zeroizing_json(&new_state)?.to_vec(),
-        commit_bytes,
-    ))
+    Ok((new_state.to_zeroizing_json()?.to_vec(), commit_bytes))
 }
 
 /// Process a Welcome message to join a group.
@@ -558,7 +555,7 @@ pub fn process_welcome(
         serde_json::from_slice(&welcome_bytes)
             .map_err(|e| anyhow::anyhow!("Invalid combined welcome payload: {:?}", e))?;
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
 
     let provider = OpenMlsRustCrypto::default();
@@ -656,7 +653,7 @@ pub fn process_welcome(
         storage_map,
     };
 
-    let state_bytes = crate::mls::zeroizing_json(&state)?;
+    let state_bytes = state.to_zeroizing_json()?;
 
     Ok(state_bytes.to_vec())
 }
@@ -672,7 +669,7 @@ pub fn mls_process_commit(
     // bundle_bytes pattern).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let _bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -712,7 +709,7 @@ pub fn mls_process_commit(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    Ok(crate::mls::zeroizing_json(&new_state)?.to_vec())
+    Ok(new_state.to_zeroizing_json()?.to_vec())
 }
 
 /// Extract a peer's MLS signature public key from their KeyPackage bytes, as

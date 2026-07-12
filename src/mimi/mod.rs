@@ -82,7 +82,7 @@ pub fn mimi_create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Res
     // Wrap the owned bundle input on entry - the same gap
     // crate::mls::groups::create_group's comment describes, closed the same way here.
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
 
@@ -132,7 +132,7 @@ pub fn mimi_create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Res
         group_id: group.group_id().to_vec(),
         storage_map,
     };
-    Ok(crate::mls::zeroizing_json(&state)?.to_vec())
+    Ok(state.to_zeroizing_json()?.to_vec())
 }
 
 /// `mimi_create_group` variant that ALSO populates `GroupContext`'s `ExternalSendersExtension` with
@@ -155,7 +155,7 @@ pub fn mimi_create_group_with_external_senders(
     // Wrap the owned bundle input on entry (see mimi_create_group's comment).
     // hub_signature_key_bytes is the hub's PUBLIC signature key - not secret.
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
 
@@ -208,7 +208,7 @@ pub fn mimi_create_group_with_external_senders(
         group_id: group.group_id().to_vec(),
         storage_map,
     };
-    Ok(crate::mls::zeroizing_json(&state)?.to_vec())
+    Ok(state.to_zeroizing_json()?.to_vec())
 }
 
 pub fn mimi_add_member(
@@ -221,9 +221,9 @@ pub fn mimi_add_member(
     // not secret.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -264,7 +264,7 @@ pub fn mimi_add_member(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
     // The welcome is an MlsMessageOut with the tree embedded → conformant, self-contained.
     let welcome_message_bytes = welcome.tls_serialize_detached()?;
     Ok((new_group_state.to_vec(), welcome_message_bytes))
@@ -279,9 +279,9 @@ pub fn mimi_add_member_commit(
     // comment).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -322,7 +322,7 @@ pub fn mimi_add_member_commit(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
     let welcome_message_bytes = welcome.tls_serialize_detached()?;
     let commit_bytes = commit.tls_serialize_detached()?;
     Ok((
@@ -341,9 +341,9 @@ pub fn mimi_remove_member_commit(
     // comment).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -388,7 +388,7 @@ pub fn mimi_remove_member_commit(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
     let commit_bytes = commit.tls_serialize_detached()?;
     Ok((new_group_state.to_vec(), commit_bytes))
 }
@@ -433,9 +433,9 @@ pub fn mimi_accept_external_remove_proposal(
         "mimi_accept_external_remove_proposal called against an unexpected profile/lane policy"
     );
 
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -528,7 +528,7 @@ pub fn mimi_accept_external_remove_proposal(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
     let commit_bytes = commit.tls_serialize_detached()?;
     Ok((new_group_state.to_vec(), commit_bytes))
 }
@@ -543,9 +543,9 @@ pub fn mimi_add_member_commit_appsync(
     // comment). roster_payload is the AppSync custom-proposal payload - not secret.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -602,7 +602,7 @@ pub fn mimi_add_member_commit_appsync(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
     let welcome_bytes = welcome.tls_serialize_detached()?;
     let commit_bytes = commit.tls_serialize_detached()?;
     Ok((new_group_state.to_vec(), welcome_bytes, commit_bytes))
@@ -618,9 +618,9 @@ pub fn mimi_remove_member_commit_appsync(
     // mimi_add_member_commit_appsync's comment).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -675,7 +675,7 @@ pub fn mimi_remove_member_commit_appsync(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let new_group_state = new_state.to_zeroizing_json()?;
     let commit_bytes = commit.tls_serialize_detached()?;
     Ok((new_group_state.to_vec(), commit_bytes))
 }
@@ -689,7 +689,7 @@ pub fn mls_process_commit_appsync(
     // unused-but-still-owned bundle_bytes pattern).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let _bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let mut state = GroupState::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -739,10 +739,7 @@ pub fn mls_process_commit_appsync(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    Ok((
-        crate::mls::zeroizing_json(&new_state)?.to_vec(),
-        roster_payload,
-    ))
+    Ok((new_state.to_zeroizing_json()?.to_vec(), roster_payload))
 }
 
 /// Hub-identity pinning on join: `mimi_accept_external_remove_proposal` only ever checks
@@ -767,7 +764,7 @@ pub fn mimi_process_welcome(
     // wire form) and expected_hub_signature_key_bytes is the hub's PUBLIC key - neither is
     // the plaintext key bundle.
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+    let mut identity = IdentityBundle::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
     {
@@ -841,7 +838,7 @@ pub fn mimi_process_welcome(
         group_id: group.group_id().to_vec(),
         storage_map,
     };
-    Ok(crate::mls::zeroizing_json(&state)?.to_vec())
+    Ok(state.to_zeroizing_json()?.to_vec())
 }
 
 #[cfg(test)]

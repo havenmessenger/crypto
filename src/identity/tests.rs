@@ -40,7 +40,7 @@ fn generate_identity_from_seed_recovery_property() {
         sig1, expected_pub,
         "extracted key must equal the seed's pubkey"
     );
-    let bundle: IdentityBundle = serde_json::from_slice(&bundle1).unwrap();
+    let bundle = IdentityBundle::from_slice(&bundle1).unwrap();
     assert_eq!(
         hex::encode_upper(&bundle.public_key_bytes),
         expected_pub,
