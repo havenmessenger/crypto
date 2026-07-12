@@ -1,0 +1,18 @@
+# Allowlist for guard 5 (check_public_comment_hygiene.py): letter+digit tokens that are
+# legitimate, self-resolving public identifiers or established technical vocabulary in THIS repo -
+# not an internal review/finding tag. One token per line, addable without a code change. Comments
+# (#) allowed.
+
+# PBKDF2 (RFC 8018 §5.2) iterate-block naming: U_1 is the first pseudorandom-function output block
+# in the standard's own notation.
+U1
+
+# AES-GCM (NIST SP 800-38D) initial-counter-block naming: J_0 is the standard's own notation for
+# the GHASH-derived counter block used for non-96-bit nonces.
+J0
+
+# Curve25519 ECDH function name (RFC 7748).
+X25519
+
+# rustc compiler error code (a public, documented rustc diagnostic ID - doc.rust-lang.org/error_codes/).
+E0365

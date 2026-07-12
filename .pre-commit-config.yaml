@@ -18,3 +18,9 @@ repos:
         entry: python3 scripts/check_tell_scan.py
         language: system
         pass_filenames: true
+
+      - id: public-comment-hygiene
+        name: Public-comment-hygiene (guard 5 — no provenance/process narration in comments)
+        entry: python3 scripts/check_public_comment_hygiene.py
+        language: system
+        pass_filenames: true

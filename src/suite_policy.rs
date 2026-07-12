@@ -44,10 +44,11 @@ pub const fn mls_generation_suite() -> Ciphersuite {
 /// `mls_generation_suite()` - a deliberate, KAT-gated, two-sided wire event (INV-MLS-002).
 pub const MLS_ACCEPTED_SUITE_U16: u16 = 0x0001;
 
-/// Lockstep value with `mimi_core::gate::HAVEN_MLS_CIPHERSUITE_U16` (0x0001). mimi-core is NOT a
-/// dependency of `rust/` (the WASM wall), so the two suite-gates are a deliberate duplication kept
-/// honest by this documented value-match + the lockstep test below - the same discipline as the
-/// `participant_list` codec. If mimi-core's pin ever changes, this must change in lockstep.
+/// Lockstep value with `mimi_core::gate::HAVEN_MLS_CIPHERSUITE_U16` (0x0001). mimi-core has no
+/// compile-time link to this crate (the WASM-target build excludes it), so the two suite-gates are
+/// a deliberate duplication kept honest by this documented value-match + the lockstep test below -
+/// the same discipline as the `participant_list` codec. If mimi-core's pin ever changes, this must
+/// change in lockstep.
 #[must_use]
 pub const fn mls_accepted_suites() -> &'static [u16] {
     &[MLS_ACCEPTED_SUITE_U16]
@@ -159,8 +160,8 @@ mod tests {
         // We must accept what we generate (today both are 0x0001).
         assert!(mls_accepted_suites().contains(&u16::from(MLS_GENERATION_SUITE)));
         // Documented value-match with mimi_core::gate::HAVEN_MLS_CIPHERSUITE_U16 (= 0x0001).
-        // mimi-core is not a rust/ dep (WASM wall) → no compile-time link → this literal IS the
-        // lockstep; if gate.rs's pin changes, change this in the same commit.
+        // mimi-core has no compile-time link to this crate (the WASM-target build excludes it) →
+        // this literal IS the lockstep; if gate.rs's pin changes, change this in the same commit.
         assert_eq!(MLS_ACCEPTED_SUITE_U16, 0x0001);
     }
 }

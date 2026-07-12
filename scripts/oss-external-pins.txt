@@ -1,0 +1,8 @@
+# Allowlist for guard 5 (check_public_comment_hygiene.py): commit hashes of EXTERNAL repos
+# legitimately cited in this repo's comments/docs (reproducibility cross-checks, upstream forks
+# this crate's tests are verified against). One lowercase hex hash per line. Comments (#) allowed.
+# A hash here is a citation OF another project, never a citation of this repo's own history.
+#
+# Empty: this repo currently cites no external repo by commit hash in its comments/docs (verified
+# by grep before shipping this guard). Add an entry here, in the same commit that adds the
+# citation, if that ever changes.
