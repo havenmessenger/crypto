@@ -1,0 +1,16 @@
+# Pinned toolchain for reproducible builds. This pin is for the NATIVE (non-WASM) build path -
+# the crate itself needs no nightly-only features and builds clean on stable.
+#
+# WASM builds are a separate case: this crate depends on `openmls 0.8.1`, which has a
+# `wasm32`-gated glob re-export that hit an E0365 error (the re-export exposes items that are
+# `pub(crate)` outside the wasm32 cfg) on the nightly toolchain available when this crate's WASM
+# build was first verified. Native builds are unaffected (those items never compile for
+# x86_64/aarch64, so the glob never re-exports them). `nightly-2026-03-28` is the toolchain
+# `cargo build --target wasm32-unknown-unknown` is verified against - see
+# docs/REPRODUCIBLE_BUILDS.md. A later nightly release has since been checked and builds this
+# crate's WASM target clean, so the error is not universal to every nightly newer than this
+# pin - re-verify before assuming any specific later nightly reproduces it either way;
+# `nightly-2026-03-28` remains the one this repo actively tests and pins.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

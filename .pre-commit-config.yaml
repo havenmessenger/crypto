@@ -1,0 +1,20 @@
+repos:
+  - repo: local
+    hooks:
+      - id: manifest-purity
+        name: Manifest-purity (guard 1 — no non-crates.io deps)
+        entry: python3 scripts/check_manifest_purity.py
+        language: system
+        pass_filenames: false
+
+      - id: one-way-dep
+        name: One-way dependency (guard 3 — no app/binding-crate references)
+        entry: python3 scripts/check_one_way_dep.py
+        language: system
+        pass_filenames: false
+
+      - id: tell-scan
+        name: Tell-scan (guard 4 — no internal tracker IDs / dev IPs / founder PII)
+        entry: python3 scripts/check_tell_scan.py
+        language: system
+        pass_filenames: true

@@ -1,0 +1,24 @@
+"""Template for _tell_scan_denylist.py — copy to _tell_scan_denylist.py (gitignored)
+and fill in your own project's sensitive literals. Do NOT commit the populated file.
+
+check_tell_scan.py imports SENSITIVE_PATTERNS and COMMENT_SCOPED_PATTERNS from
+_tell_scan_denylist.py at runtime if present, and falls back to shape-only coverage
+(tracker IDs, doc paths, dev IPs) if the sidecar is absent, so this file being
+missing degrades coverage rather than breaking the guard.
+"""
+
+import re
+
+SENSITIVE_PATTERNS = {
+    # "example label": re.compile(r"\bexample-sensitive-term\b", re.IGNORECASE),
+}
+
+# Optional: patterns that need comment-line scoping to avoid colliding with real code
+# tokens (const names, type params, hex literals) - only checked on `//`/`///` lines.
+COMMENT_SCOPED_PATTERNS = {
+    # "example comment-scoped label": re.compile(r"\bEXAMPLE\d\b"),
+}
+
+# Optional: consumed by check_one_way_dep.py (guard 3) if your binding-crate name is
+# itself sensitive (e.g. reveals an internal project name). Leave as None if not needed.
+ONE_WAY_DEP_SENSITIVE_PATTERN = None  # re.compile(r"\byour_binding_crate_name\b")

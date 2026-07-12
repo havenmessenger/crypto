@@ -1,0 +1,70 @@
+# cargo-audit configuration - auto-read by `cargo audit` (it reads `.cargo/audit.toml` relative to cwd).
+#
+# Each advisory below was verified against the LIVE resolved build graph (`cargo tree -i`), not assumed.
+# This crate is Haven's cryptographic core (OpenPGP + MLS primitives) - the advisories are either
+# reachable-but-mitigated (documented trust-boundary trace) or genuinely uncompiled/build-time-only.
+
+[advisories]
+ignore = [
+    # ── LIVE in the resolved tree ─────────────────────────────────────────────────────────────
+
+    # RUSTSEC-2023-0071 - `rsa` 0.9.10 Marvin Attack timing side-channel (MED 5.9).
+    # Chain: rsa <- pgp 0.14.2 <- crypto-core (PGP key gen / decrypt). COMPILED.
+    # Disposition: ACCEPTED-RISK - reachable-as-code but NOT attacker-timeable. The vulnerable operation
+    # is RSA PKCS#1 v1.5 *decryption* (the private-key unpadding); RSA is never the default key type
+    # this crate generates (default is ECC Curve25519) - RSA only exists for a caller that explicitly
+    # requests it or imports a legacy RSA key. Decryption runs entirely on the caller's device; this
+    # crate has no server-side decrypt endpoint and no network-visible timing/behavioral channel that
+    # echoes decrypt duration or padding-validity back to a remote party. Marvin's attack needs an
+    # attacker-accessible timing oracle (10^4-10^6 precisely-timed chosen ciphertexts, or a
+    # valid/invalid-padding behavioral difference visible over the network) - an on-device decrypt with
+    # no server round-trip structurally denies that oracle. No fixed upstream release of `rsa` exists;
+    # hand-patching a vetted crypto crate would violate this crate's "no bespoke ciphers, stand on
+    # vetted primitives" invariant, so the disposition is accepted-risk, not a code change.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0124 - `libcrux-chacha20poly1305` 0.0.7 panic on overlong ciphertext (HIGH 8.2).
+    # NON-ACTIVATED LOCKFILE PHANTOM: resolves into Cargo.lock as an OPTIONAL backend dependency of
+    # `libcrux-aead` (an optional hpke-rs backend), but that backend feature is NOT enabled - this crate
+    # uses the RustCrypto backend (`openmls_rust_crypto` -> `hpke-rs-rust-crypto`). Verified:
+    # `cargo tree -i libcrux-chacha20poly1305` and `-i libcrux-aead` print NOTHING under default /
+    # --all-features / --target all, so the crate is never compiled or linked. The AEAD this crate
+    # actually drives for a ChaCha suite is RustCrypto `chacha20poly1305` 0.10.1 (not vulnerable). No
+    # upstream bump is possible regardless - `hpke-rs-libcrux` 0.6.1 hard-pins `libcrux-aead = "=0.0.7"`
+    # - and there is zero gain in bumping a crate that never compiles. Re-evaluate if the libcrux hpke-rs
+    # backend is ever activated.
+    "RUSTSEC-2026-0124",
+
+    # RUSTSEC-2024-0384 - `instant` 0.1.13 unmaintained (warning).
+    # Chain: instant <- parking_lot 0.11.2 <- fluvio-wasm-timer <- openmls 0.8.1. Non-security time
+    # helper; clears when openmls's parking_lot dependency bumps.
+    "RUSTSEC-2024-0384",
+
+    # RUSTSEC-2026-0173 - `proc-macro-error2` 2.0.1 unmaintained (warning).
+    # Chain: proc-macro-error2 <- hax-lib-macros <- (libcrux verification toolchain) <- openmls_rust_crypto.
+    # BUILD-TIME proc-macro only - not present in the shipped library artifact.
+    "RUSTSEC-2026-0173",
+
+    # ── RETAINED DEFENSIVELY - not currently in this crate's resolved tree. Kept so a transitive
+    #    re-introduction (an openmls/dep bump) stays covered without a silent regression. Prune only
+    #    after confirming the dependency that would pull them in is gone for good. ──────────────────
+
+    # RUSTSEC-2026-0097 - `rand` unsound with a custom logger using rand::rng(). This crate registers no
+    # custom rand logger; theoretical only.
+    "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2025-0023 - tokio broadcast channel not Sync. Not used directly by this crate; a
+    # transitive dependency of the wider ecosystem this crate's deps pull in.
+    "RUSTSEC-2025-0023",
+
+    # RUSTSEC-2025-0056 - `adler` crate unmaintained - maintenance noise, no known vulnerability.
+    "RUSTSEC-2025-0056",
+]
+
+# `num-bigint` 0.4.7 is flagged YANKED (a crates.io publisher action, not a RUSTSEC advisory - it
+# has no ID to list above). Chain: num-bigint <- hax-lib <- (the same libcrux formal-verification
+# toolchain as RUSTSEC-2026-0173) <- openmls_rust_crypto. Verified: `cargo tree -i num-bigint`
+# prints nothing under the default feature set - it resolves only under --all-features --target
+# all, i.e. it is build-time verification tooling, not part of this crate's compiled output. `cargo
+# audit` treats a yanked-crate warning as non-blocking by default (exit 0); documented here so the
+# reasoning is on record rather than the warning going unexplained.

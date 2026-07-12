@@ -1,0 +1,73 @@
+# CI for Haven Crypto (crypto-core). Enforces formatting, lints, tests, dependency audit, and
+# the standalone-source-of-truth guards below (guard 1: every dependency resolves from
+# crates.io; guard 3: no leaf-library reach-up into app-binding types).
+#
+# This job running on a fresh `actions/checkout`, with nothing else present, IS guard #2
+# (standalone-build-in-clean-room): if it's green here, crypto-core is standalone by definition.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # Pinned to match rust-toolchain.toml's `channel` exactly — `@stable` would install
+      # whatever "stable" resolves to at CI run time, silently drifting from the pin this repo
+      # claims to build under (and, from a fresh clone, actually failing `cargo fmt --check`
+      # once the two diverge). Bump both together on a deliberate toolchain update.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - name: manifest-purity (guard 1)
+        run: python3 scripts/check_manifest_purity.py
+      - name: one-way-dep (guard 3)
+        run: python3 scripts/check_one_way_dep.py
+      - name: tell-scan (guard 4)
+        run: python3 scripts/check_tell_scan.py
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        # Deny on the lib surface. Tests use unwrap()/panic() idiomatically; they are compiled
+        # and run by `cargo test`, just not deny-linted for those. Matches the Haven crate bar.
+        run: cargo clippy --lib -- -D warnings
+      - name: test
+        # guard #2: this job IS the standalone clean-room build (fresh checkout, nothing else present)
+        run: cargo test
+      - name: audit
+        # `cargo audit` auto-reads .cargo/audit.toml if present, so documented advisory
+        # dispositions (e.g. the RSA Marvin / libcrux-phantom notes) apply.
+        run: cargo install cargo-audit --locked && cargo audit
+
+  reproducible-build:
+    # Stage 1 of docs/REPRODUCIBLE_BUILDS.md: proves the WASM-target build of this crate is
+    # byte-identical across two independent builds in a clean checkout. This crate is a plain
+    # rlib (no wasm-bindgen post-processing here - that only applies further downstream, to a
+    # final cdylib entry point this repo does not build), so the .rlib itself is the artifact
+    # to diff. Uses nightly-2026-03-28: the toolchain this crate's WASM
+    # build is actively verified against — see rust-toolchain.toml's comment for the full
+    # explanation. Verified locally byte-identical before this job was added.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: install pinned nightly + wasm32 target
+        run: |
+          rustup toolchain install nightly-2026-03-28 --profile minimal
+          rustup target add wasm32-unknown-unknown --toolchain nightly-2026-03-28
+      - name: build 1
+        run: |
+          rm -rf target/wasm32-unknown-unknown
+          cargo +nightly-2026-03-28 build --release --target wasm32-unknown-unknown
+          cp target/wasm32-unknown-unknown/release/libcrypto_core.rlib /tmp/build1.rlib
+      - name: build 2 (clean)
+        run: |
+          rm -rf target/wasm32-unknown-unknown
+          cargo +nightly-2026-03-28 build --release --target wasm32-unknown-unknown
+      - name: diff
+        run: |
+          sha256sum /tmp/build1.rlib target/wasm32-unknown-unknown/release/libcrypto_core.rlib
+          cmp /tmp/build1.rlib target/wasm32-unknown-unknown/release/libcrypto_core.rlib

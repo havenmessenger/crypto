@@ -1,0 +1,62 @@
+# Haven crypto-core - the FRB-free, pure-Rust crypto/protocol library. A standalone answer to
+# "what is the cryptography?" with NOTHING app-specific.
+#
+# HARD INVARIANT: no `flutter_rust_bridge` dependency, ever. The one-way-dependency guard
+# (scripts/check_one_way_dep.py) and the manifest-purity guard (scripts/check_manifest_purity.py)
+# both fail CI if this is violated.
+
+[package]
+name = "crypto-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96.0"
+description = "Haven's cryptographic core - OpenPGP (RFC 4880) and MLS-related primitives (RFC 9420), native + WASM, FRB-free."
+repository = "https://github.com/havenmessenger/crypto"
+license = "AGPL-3.0-only"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+anyhow = "1.0.100"
+getrandom = { version = "0.2", features = ["js"] }
+hex = "0.4.3"
+openmls = { version = "0.8.1", features = ["js"] }
+openmls_rust_crypto = "0.5.1"
+openmls_traits = "0.5.0"
+serde = "1.0.228"
+serde_json = "1.0.149"
+tls_codec = "0.4.2"
+chrono = { version = "0.4", features = ["clock"] }
+pgp = { version = "0.14", default-features = false, features = ["wasm"] }
+rand = { version = "0.8" }
+rand_chacha = { version = "0.3" }
+ed25519-dalek = { version = "2" }
+pbkdf2 = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+hkdf = "0.12"
+zeroize = { version = "1", features = ["derive"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+aes = { version = "0.8", default-features = false }
+ctr = { version = "0.9", default-features = false }
+bip39 = "2.2.2"
+base64 = "0.22"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+panic = "warn"
+missing_errors_doc = "allow"
+too_long_first_doc_paragraph = "allow"
