@@ -132,7 +132,7 @@ pub fn mimi_create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Res
         group_id: group.group_id().to_vec(),
         storage_map,
     };
-    Ok(state.to_zeroizing_json()?.to_vec())
+    Ok(state.to_zeroizing_json()?.as_bytes().to_vec())
 }
 
 /// `mimi_create_group` variant that ALSO populates `GroupContext`'s `ExternalSendersExtension` with
@@ -208,7 +208,7 @@ pub fn mimi_create_group_with_external_senders(
         group_id: group.group_id().to_vec(),
         storage_map,
     };
-    Ok(state.to_zeroizing_json()?.to_vec())
+    Ok(state.to_zeroizing_json()?.as_bytes().to_vec())
 }
 
 pub fn mimi_add_member(
@@ -267,7 +267,7 @@ pub fn mimi_add_member(
     let new_group_state = new_state.to_zeroizing_json()?;
     // The welcome is an MlsMessageOut with the tree embedded → conformant, self-contained.
     let welcome_message_bytes = welcome.tls_serialize_detached()?;
-    Ok((new_group_state.to_vec(), welcome_message_bytes))
+    Ok((new_group_state.as_bytes().to_vec(), welcome_message_bytes))
 }
 
 pub fn mimi_add_member_commit(
@@ -326,7 +326,7 @@ pub fn mimi_add_member_commit(
     let welcome_message_bytes = welcome.tls_serialize_detached()?;
     let commit_bytes = commit.tls_serialize_detached()?;
     Ok((
-        new_group_state.to_vec(),
+        new_group_state.as_bytes().to_vec(),
         welcome_message_bytes,
         commit_bytes,
     ))
@@ -390,7 +390,7 @@ pub fn mimi_remove_member_commit(
     };
     let new_group_state = new_state.to_zeroizing_json()?;
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((new_group_state.to_vec(), commit_bytes))
+    Ok((new_group_state.as_bytes().to_vec(), commit_bytes))
 }
 
 /// The mimi-lane external-proposal acceptance path
@@ -530,7 +530,7 @@ pub fn mimi_accept_external_remove_proposal(
     };
     let new_group_state = new_state.to_zeroizing_json()?;
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((new_group_state.to_vec(), commit_bytes))
+    Ok((new_group_state.as_bytes().to_vec(), commit_bytes))
 }
 
 pub fn mimi_add_member_commit_appsync(
@@ -605,7 +605,11 @@ pub fn mimi_add_member_commit_appsync(
     let new_group_state = new_state.to_zeroizing_json()?;
     let welcome_bytes = welcome.tls_serialize_detached()?;
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((new_group_state.to_vec(), welcome_bytes, commit_bytes))
+    Ok((
+        new_group_state.as_bytes().to_vec(),
+        welcome_bytes,
+        commit_bytes,
+    ))
 }
 
 pub fn mimi_remove_member_commit_appsync(
@@ -677,7 +681,7 @@ pub fn mimi_remove_member_commit_appsync(
     };
     let new_group_state = new_state.to_zeroizing_json()?;
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((new_group_state.to_vec(), commit_bytes))
+    Ok((new_group_state.as_bytes().to_vec(), commit_bytes))
 }
 
 pub fn mls_process_commit_appsync(
@@ -739,7 +743,10 @@ pub fn mls_process_commit_appsync(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    Ok((new_state.to_zeroizing_json()?.to_vec(), roster_payload))
+    Ok((
+        new_state.to_zeroizing_json()?.as_bytes().to_vec(),
+        roster_payload,
+    ))
 }
 
 /// Hub-identity pinning on join: `mimi_accept_external_remove_proposal` only ever checks
@@ -838,7 +845,7 @@ pub fn mimi_process_welcome(
         group_id: group.group_id().to_vec(),
         storage_map,
     };
-    Ok(state.to_zeroizing_json()?.to_vec())
+    Ok(state.to_zeroizing_json()?.as_bytes().to_vec())
 }
 
 #[cfg(test)]

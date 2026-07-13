@@ -106,10 +106,11 @@ fn mlssigner_key_wipes_on_drop() {
 /// it" (trivially true for any `Vec<u8>`), not "this value wipes itself when merely dropped,
 /// with no caller action" (the actual claim `Zeroizing` exists to make).
 ///
-/// The proof is the explicit `Zeroizing<Vec<u8>>` type annotation on `serialized` below: a
-/// compile-time proof of the return type itself, unconditional on every build, that a manual
-/// runtime check can't offer. If `zeroizing_json` ever stopped returning `Zeroizing`, this line
-/// would fail to compile, not silently keep passing.
+/// The proof is the explicit `Zeroizing<Vec<u8>>` type annotation on `zeroizing` below,
+/// reached via `SerializedSecret::into_zeroizing`: a compile-time proof of the underlying
+/// storage itself, unconditional on every build, that a manual runtime check can't offer. If
+/// `into_zeroizing` ever stopped returning `Zeroizing`, this line would fail to compile, not
+/// silently keep passing.
 ///
 /// The runtime check below deliberately uses `ManuallyDrop` (matching the other proofs in this
 /// file - never deallocates, so unambiguously race-free under `cargo test`'s parallel runner,
@@ -130,18 +131,20 @@ fn zeroizing_json_output_wipes_on_drop() {
     bundle.private_key[0] = 0xAB;
     bundle.private_key[1] = 0xCD;
 
-    let serialized: zeroize::Zeroizing<Vec<u8>> = bundle.to_zeroizing_json().expect("serialize");
+    let serialized = bundle.to_zeroizing_json().expect("serialize");
     // `serde_json` encodes `Vec<u8>` as a JSON array of decimal numbers, not raw bytes - confirm
     // the fixture's marker (171, 205) actually landed in the buffer's ASCII text before proving
     // the buffer gets wiped.
     assert!(
         serialized
+            .as_bytes()
             .windows(b"171,205".len())
             .any(|w| w == b"171,205"),
         "fixture sanity: private_key marker not found in the serialized buffer"
     );
 
-    let mut guard = ManuallyDrop::new(serialized);
+    let zeroizing: zeroize::Zeroizing<Vec<u8>> = serialized.into_zeroizing();
+    let mut guard = ManuallyDrop::new(zeroizing);
     let (ptr, len) = (guard.as_ptr(), guard.len());
     guard.zeroize(); // the same call Zeroizing's own Drop impl makes on this value
                      // SAFETY: `guard` is never dropped (ManuallyDrop leaks it for this test),
@@ -151,6 +154,55 @@ fn zeroizing_json_output_wipes_on_drop() {
     assert!(
         bytes.iter().all(|&b| b == 0),
         "zeroizing_json's output buffer left residue on drop"
+    );
+}
+
+/// Proof that `ZeroizingSink::write`'s grow step wipes the SUPERSEDED backing buffer before
+/// dropping it, not just the final one (the residual `zeroizing_json`'s own doc used to
+/// disclose: "growth reallocations free prior plaintext allocations unwiped"). Same technique as
+/// the other proofs in this file - `ManuallyDrop` so the real deallocation never runs, invoking
+/// the exact `zeroize()` call the grow step's `self.0 = grown` reassignment triggers on the old
+/// value via its `Drop` impl, rather than reading memory the allocator has actually freed (this
+/// file's own stated reason for avoiding that shape of check, see
+/// `zeroizing_json_output_wipes_on_drop`'s doc).
+#[test]
+fn zeroizing_sink_grow_wipes_superseded_buffer() {
+    let mut old = Zeroizing::new(Vec::with_capacity(8));
+    old.extend_from_slice(&[0xABu8; 8]);
+    let mut guard = ManuallyDrop::new(old);
+    let (ptr, len) = (guard.as_ptr(), guard.len());
+    guard.zeroize(); // the exact call the grow step's old-value Drop makes
+                     // SAFETY: `guard` is never dropped, so the allocation stays live and unreused.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    assert!(
+        bytes.iter().all(|&b| b == 0),
+        "grow-superseded ZeroizingSink buffer left residue"
+    );
+}
+
+/// Behavioral companion to the proof above: forces `zeroizing_json` through several real growth
+/// steps (a `GroupState` whose `storage_map` serializes well past the sink's initial small
+/// capacity) and confirms the content survives byte-identical - a regression guard on the grow
+/// arithmetic itself (an off-by-one in `needed`/`new_cap` would corrupt or truncate the tail).
+#[test]
+fn zeroizing_json_survives_multiple_grow_steps() {
+    let storage_map: Vec<(Vec<u8>, Vec<u8>)> = (0u8..64)
+        .map(|i| (vec![i; 16], vec![i.wrapping_mul(7); 256]))
+        .collect();
+    let state = GroupState {
+        group_id: b"grow-test-group".to_vec(),
+        storage_map: storage_map.clone(),
+    };
+    let serialized = state.to_zeroizing_json().expect("serialize");
+    assert!(
+        serialized.len() > 64,
+        "fixture sanity: this payload should force at least one grow past a 64-byte floor"
+    );
+    let round_tripped = GroupState::from_slice(serialized.as_bytes()).expect("deserialize");
+    assert_eq!(round_tripped.group_id, b"grow-test-group");
+    assert_eq!(
+        round_tripped.storage_map, storage_map,
+        "grow-path content mismatch"
     );
 }
 
@@ -481,7 +533,10 @@ mod suite_gate {
             user_id: user_id.to_string(),
             storage_map,
         };
-        (kp_bytes, bundle.to_zeroizing_json().unwrap().to_vec())
+        (
+            kp_bytes,
+            bundle.to_zeroizing_json().unwrap().as_bytes().to_vec(),
+        )
     }
 
     /// Create a group under an ARBITRARY ciphersuite (a foreign peer's group). Mirrors
@@ -525,7 +580,7 @@ mod suite_gate {
             group_id: group.group_id().to_vec(),
             storage_map,
         };
-        state.to_zeroizing_json().unwrap().to_vec()
+        state.to_zeroizing_json().unwrap().as_bytes().to_vec()
     }
 
     /// Raw, UNGATED add - builds a Welcome by adding a foreign KeyPackage to a foreign group via

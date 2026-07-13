@@ -122,7 +122,7 @@ pub fn regenerate_key_package(
     Ok((
         mem::take(&mut old.user_id),
         new_key_package_bytes,
-        new_bundle_bytes.to_vec(),
+        new_bundle_bytes.as_bytes().to_vec(),
     ))
 }
 
@@ -182,7 +182,7 @@ pub fn create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Result<V
 
     let state_bytes = state.to_zeroizing_json()?;
 
-    Ok(state_bytes.to_vec())
+    Ok(state_bytes.as_bytes().to_vec())
 }
 
 pub fn encrypt_message(
@@ -237,7 +237,7 @@ pub fn encrypt_message(
 
     let ciphertext = message.tls_serialize_detached()?;
 
-    Ok((new_group_state.to_vec(), ciphertext))
+    Ok((new_group_state.as_bytes().to_vec(), ciphertext))
 }
 
 pub fn decrypt_message(
@@ -292,7 +292,7 @@ pub fn decrypt_message(
     };
     let new_group_state = new_state.to_zeroizing_json()?;
 
-    Ok((new_group_state.to_vec(), content))
+    Ok((new_group_state.as_bytes().to_vec(), content))
 }
 
 /// Add a member to the MLS group using their KeyPackage.
@@ -382,7 +382,11 @@ pub fn add_member(
     let combined_welcome = serde_json::to_vec(&(welcome_bytes, ratchet_tree_bytes))?;
     let commit_bytes = commit.tls_serialize_detached()?;
 
-    Ok((new_group_state.to_vec(), combined_welcome, commit_bytes))
+    Ok((
+        new_group_state.as_bytes().to_vec(),
+        combined_welcome,
+        commit_bytes,
+    ))
 }
 
 /// Add multiple members to the MLS group in a single commit using their KeyPackages.
@@ -462,7 +466,11 @@ pub fn add_members_bulk(
     let combined_welcome = serde_json::to_vec(&(welcome_bytes, ratchet_tree_bytes))?;
     let commit_bytes = commit.tls_serialize_detached()?;
 
-    Ok((new_group_state.to_vec(), combined_welcome, commit_bytes))
+    Ok((
+        new_group_state.as_bytes().to_vec(),
+        combined_welcome,
+        commit_bytes,
+    ))
 }
 
 /// Remove a member from the MLS group by their credential identity (user_id string).
@@ -537,7 +545,10 @@ pub fn remove_member_by_credential(
     };
 
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((new_state.to_zeroizing_json()?.to_vec(), commit_bytes))
+    Ok((
+        new_state.to_zeroizing_json()?.as_bytes().to_vec(),
+        commit_bytes,
+    ))
 }
 
 /// Process a Welcome message to join a group.
@@ -655,7 +666,7 @@ pub fn process_welcome(
 
     let state_bytes = state.to_zeroizing_json()?;
 
-    Ok(state_bytes.to_vec())
+    Ok(state_bytes.as_bytes().to_vec())
 }
 
 /// Process an incoming Commit: an existing member advances its epoch after another member
@@ -709,7 +720,7 @@ pub fn mls_process_commit(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    Ok(new_state.to_zeroizing_json()?.to_vec())
+    Ok(new_state.to_zeroizing_json()?.as_bytes().to_vec())
 }
 
 /// Extract a peer's MLS signature public key from their KeyPackage bytes, as

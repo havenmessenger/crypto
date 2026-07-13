@@ -166,7 +166,7 @@ pub fn build_identity_from_keypair(
 
     let bundle_bytes = identity_bundle.to_zeroizing_json()?;
 
-    Ok((user_id, key_package_bytes, bundle_bytes.to_vec()))
+    Ok((user_id, key_package_bytes, bundle_bytes.as_bytes().to_vec()))
 }
 
 #[must_use]

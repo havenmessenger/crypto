@@ -1,11 +1,13 @@
 //! Shared MLS primitive types + helpers. Used by the native domain modules in this crate
 //! (`crate::mls::groups`, `crate::mimi`, `crate::identity`).
 //!
-//! These types are `pub` (not `pub(crate)`) because a consuming application reuses them
-//! directly - as opaque handles passed between this crate's own functions, not as bare
-//! serde types. Serialization is an inherent API (`to_zeroizing_json`/`from_slice`) over a
-//! module-private wire DTO, so a consumer cannot reach the plaintext bytes through any
-//! `Serialize`-based encoder except the one that wipes its own output on drop.
+//! `GroupState`/`IdentityBundle` are `pub` types with `pub(crate)` fields: a consuming
+//! application reuses them as opaque handles passed between this crate's own functions, never
+//! by reading a field directly - the secret-bearing fields being crate-private (not just
+//! undocumented) is what makes that a compiler-enforced property rather than a convention.
+//! Serialization is an inherent API (`to_zeroizing_json`/`from_slice`) over a module-private
+//! wire DTO, returning [`SerializedSecret`] rather than a bare `Zeroizing<Vec<u8>>` - see that
+//! type's own doc for why a `Zeroizing` return alone does not close the escape.
 
 pub mod groups;
 
@@ -28,8 +30,8 @@ use zeroize::{Zeroize, Zeroizing};
 /// of this type's plaintext fields is wrapped in `Zeroizing` by construction, not by the
 /// caller remembering to route through it.
 pub struct GroupState {
-    pub group_id: Vec<u8>,
-    pub storage_map: Vec<(Vec<u8>, Vec<u8>)>,
+    pub(crate) group_id: Vec<u8>,
+    pub(crate) storage_map: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Drop for GroupState {
@@ -58,8 +60,8 @@ struct GroupStateDeDto {
 
 impl GroupState {
     /// Serialize into a self-wiping buffer. See [`zeroizing_json`] for the residuals this
-    /// still carries (reallocation during encode, the error-path gap).
-    pub fn to_zeroizing_json(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    /// still carries.
+    pub fn to_zeroizing_json(&self) -> anyhow::Result<SerializedSecret> {
         zeroizing_json(&GroupStateSerDto {
             group_id: &self.group_id,
             storage_map: &self.storage_map,
@@ -86,13 +88,13 @@ impl GroupState {
 ///
 /// Carries no `Serialize`/`Deserialize` impl of its own - see [`GroupState`]'s doc for why.
 pub struct IdentityBundle {
-    pub key_package_bundle: KeyPackageBundle,
-    pub private_key: Vec<u8>,
-    pub signature_scheme: SignatureScheme,
-    pub public_key_bytes: Vec<u8>,
-    pub user_id: String,
+    pub(crate) key_package_bundle: KeyPackageBundle,
+    pub(crate) private_key: Vec<u8>,
+    pub(crate) signature_scheme: SignatureScheme,
+    pub(crate) public_key_bytes: Vec<u8>,
+    pub(crate) user_id: String,
     // Storage map from provider - needed for process_welcome to find KeyPackage
-    pub storage_map: Vec<(Vec<u8>, Vec<u8>)>,
+    pub(crate) storage_map: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Drop for IdentityBundle {
@@ -130,8 +132,8 @@ struct IdentityBundleDeDto {
 
 impl IdentityBundle {
     /// Serialize into a self-wiping buffer. See [`zeroizing_json`] for the residuals this
-    /// still carries (reallocation during encode, the error-path gap).
-    pub fn to_zeroizing_json(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    /// still carries.
+    pub fn to_zeroizing_json(&self) -> anyhow::Result<SerializedSecret> {
         zeroizing_json(&IdentityBundleSerDto {
             key_package_bundle: &self.key_package_bundle,
             private_key: &self.private_key,
@@ -196,19 +198,91 @@ pub const KP_NOT_BEFORE_MARGIN_SECS: u64 = 60 * 60; // 1 hour back
 /// application-ciphertext Haven produces (MLS objects are small relative to MIME).
 pub const MAX_MLS_WIRE_BYTES: usize = 1024 * 1024;
 
-/// Serialize a key-bearing value (`GroupState`, `IdentityBundle`) into a self-wiping buffer.
-/// `serde_json::to_vec` alone returns a bare `Vec<u8>` holding the plaintext MLS ratchet
-/// secrets or Ed25519 private key. Wrapping the returned buffer in `Zeroizing` protects it: it
-/// wipes on drop along every exit path after this function returns, including a fallible step a
-/// caller adds later between this call and the point it takes ownership of the bytes.
-///
-/// Residual (`docs/THREAT_MODEL.md` has the full treatment): this wraps only the last buffer
-/// `serde_json::to_vec` hands back. Building that buffer reallocates as it grows, freeing each
-/// earlier, smaller backing buffer unwiped, and a serialization error drops the partially-
-/// written internal buffer before it ever reaches `Zeroizing::new`. Both happen inside
-/// `serde_json::to_vec`'s own call frame, outside this function's reach to close.
-pub fn zeroizing_json<T: Serialize>(value: &T) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-    Ok(Zeroizing::new(serde_json::to_vec(value)?))
+/// Self-wiping serialized-secret bytes returned by [`GroupState::to_zeroizing_json`] and
+/// [`IdentityBundle::to_zeroizing_json`]. Deliberately does not implement `Deref`/`AsRef<[u8]>` -
+/// those would let a caller reach a plain `&[u8]`/`Vec<u8>` through the same ergonomic path
+/// (`.to_vec()`, `.clone()`) that made the previous bare `Zeroizing<Vec<u8>>` return type
+/// trivially copyable into a non-wiping buffer with no visible indication a secret was involved.
+/// The two accessors below are the only ways out, and both are named so a reviewer can grep
+/// every place this type's bytes leave the wiping wrapper: [`SerializedSecret::as_bytes`] for a
+/// one-shot borrow, [`SerializedSecret::into_zeroizing`] to hand ownership to another wiping
+/// owner. Neither can stop a caller from copying the borrowed slice into a plain `Vec` if it
+/// chooses to - no safe-Rust API can - but both require a deliberate, auditable call instead of
+/// an inherited standard-library method.
+pub struct SerializedSecret(Zeroizing<Vec<u8>>);
+
+impl SerializedSecret {
+    /// Borrow the serialized bytes. The caller must not copy this into a non-zeroizing buffer.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Take ownership of the underlying zeroizing buffer.
+    #[must_use]
+    pub fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
+
+    /// The serialized length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the serialized form is empty (never true for a real `GroupState`/`IdentityBundle`).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Growth-aware `Write` sink backed by a [`Zeroizing`] buffer that is wiping from the FIRST byte
+/// written, not just wrapped around the final successful allocation. When a write needs more room
+/// than the current backing allocation, this grows by copying into a fresh `Zeroizing` buffer and
+/// replacing the old one - the replaced value's `Drop` (zeroize, then deallocate) runs at that
+/// point, so the freed backing allocation from the previous size never carries plaintext. Bounded
+/// by [`MAX_MLS_WIRE_BYTES`] (the same ceiling this crate already applies to inbound MLS/MIMI wire
+/// objects): a write that would exceed it fails closed instead of growing further.
+struct ZeroizingSink(Zeroizing<Vec<u8>>);
+
+impl std::io::Write for ZeroizingSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let needed = self.0.len().saturating_add(buf.len());
+        if needed > MAX_MLS_WIRE_BYTES {
+            return Err(std::io::Error::other(format!(
+                "serialized secret would exceed the {MAX_MLS_WIRE_BYTES}-byte bound ({needed} bytes)"
+            )));
+        }
+        if needed > self.0.capacity() {
+            let new_cap = needed
+                .max(self.0.capacity().saturating_mul(2))
+                .clamp(64, MAX_MLS_WIRE_BYTES);
+            let mut grown = Zeroizing::new(Vec::with_capacity(new_cap));
+            grown.extend_from_slice(&self.0);
+            self.0 = grown; // old backing buffer zeroized-then-freed via Drop here
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialize a key-bearing value (`GroupState`, `IdentityBundle`) into a self-wiping
+/// [`SerializedSecret`]. Every exit path wipes: a successful encode wraps the final buffer as
+/// before; a `serde_json` serialization error drops the in-progress [`ZeroizingSink`] (a
+/// `Zeroizing`-backed local from its first byte, not a bare `Vec` wrapped only on success); a
+/// panic unwinding through this call drops it the same way (`[profile.release]` in `Cargo.toml`
+/// carries no `panic = "abort"` override, so `Drop` runs on unwind); and a growth event zeroizes
+/// the superseded backing buffer before freeing it (see [`ZeroizingSink`]) rather than leaving it
+/// for the allocator to reuse untouched.
+pub fn zeroizing_json<T: Serialize>(value: &T) -> anyhow::Result<SerializedSecret> {
+    let mut sink = ZeroizingSink(Zeroizing::new(Vec::new()));
+    serde_json::to_writer(&mut sink, value)?;
+    Ok(SerializedSecret(sink.0))
 }
 
 /// Shared pre-deserialize guard: `bytes.len() <= MAX_MLS_WIRE_BYTES`, checked BEFORE any
