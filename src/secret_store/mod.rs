@@ -35,7 +35,7 @@
 //!
 //! # Zeroize posture (house pattern - `zeroize`, NOT `secrecy`)
 //! The secret struct derives `ZeroizeOnDrop`; its fields are write-once + never grown (no
-//! realloc-copy orphan can survive un-wiped). We deliberately do NOT add the `secrecy` crate (a
+//! realloc-copy orphan can survive un-wiped). We do NOT add the `secrecy` crate (a
 //! new auditor-visible dependency on the public crypto repo) - `zeroize` delivers the drop→wipe
 //! property the design requires.
 
@@ -111,7 +111,7 @@ struct SessionSecrets {
 /// entry drops the only owner → `ZeroizeOnDrop` runs NOW, not whenever Dart GC happens to release an
 /// Arc).
 ///
-/// The first process-global mutable state in this crate - deliberate: this module is exactly the
+/// The first process-global mutable state in this crate - deliberate: this module is the
 /// move from stateless-per-op crypto to a stateful custodian. Single `Mutex`, no `.await` held
 /// across the lock, ops are sub-millisecond → no contention concern.
 static STORE: LazyLock<Mutex<HashMap<SessionId, SessionSecrets>>> =

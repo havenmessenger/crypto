@@ -38,8 +38,8 @@ use crate::suite_policy::{
 /// **NOT an IANA-assigned MLS ciphersuite codepoint.** `draft-ietf-mls-pq-ciphersuites-05` leaves
 /// TBD1's real codepoint unassigned pending WG Chair Go-Ahead + IANA Expert Review (registry policy:
 /// "Specification Required", per `iana.org/assignments/mls/mls.xhtml`, verified 2026-07-03). This
-/// local value is drawn from that SAME registry's own **Private-Use range (`0xF000`–`0xFFFF`)** -
-/// chosen precisely so it can never collide with a future real assignment. It exists solely to drive
+/// local value is drawn from that SAME registry's own Private-Use range (`0xF000`-`0xFFFF`) -
+/// chosen so it can never collide with a future real assignment. It exists solely to drive
 /// the two tests below; it is never generated, never accepted, and never reachable from any
 /// production or FRB call site.
 pub const TBD1_LOCAL_DEMO_PLACEHOLDER_U16: u16 = 0xF001;

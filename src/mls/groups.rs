@@ -11,7 +11,7 @@
 //! `.unwrap()` here is the SAME pattern - acquiring an in-memory `RwLock` guard on a
 //! freshly-created, single-threaded `OpenMlsRustCrypto` provider's storage, where
 //! lock poisoning is unreachable (no panic is ever held across these guards). This
-//! does not relax the gate on any genuinely-fallible operation (those all use
+//! does not relax the gate on any fallible operation (those all use
 //! `?`/`map_err`).
 #![allow(
     clippy::unwrap_used, // in-memory provider RwLock guards only (see module doc)

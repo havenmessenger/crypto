@@ -74,7 +74,7 @@ fn session_count_for_test_contains(id: SessionId) -> bool {
 /// Structural contract: the ops work via the opaque `SessionId` token, while NO function in the
 /// public surface returns the root key or the PGP private bytes. The only thing a holder of the
 /// token can do is REQUEST a decryption - never retrieve the key. (Enforced by absence; this test
-/// documents + exercises that contract: a round-trip succeeds, and there is deliberately no
+/// documents + exercises that contract: a round-trip succeeds, and there is no
 /// `get_master_key(id)`-style accessor to call.)
 #[test]
 fn handle_yields_no_raw_key_only_operations() {
@@ -133,7 +133,7 @@ fn decrypt_blob_batch_round_trip_and_partial_failure() {
     let i2 = b"haven-cipher-store-blob:b".to_vec();
     let w1 = manual_seal_blob(&root_a(), &i1, b"one");
     let w2 = manual_seal_blob(&root_a(), &i2, b"two");
-    // A deliberately corrupt wire → that item fails, the batch does not.
+    // A corrupt wire → that item fails, the batch does not.
     let bad = vec![0u8; 40];
     let out = decrypt_blob_batch(
         id,
@@ -324,7 +324,7 @@ fn decrypt_cipher_store_blob_batch_round_trip_and_partial_failure() {
 
 /// The GENERIC single-layer `decrypt_blob` does NOT reproduce the cipher-store's TWO-layer
 /// plaintext - the one-pass key differs from the two-pass key, so the tag fails (fail-closed).
-/// This is exactly why the cipher-store needed its own dedicated two-layer op, not `decrypt_blob`.
+/// This is why the cipher-store needed its own dedicated two-layer op, not `decrypt_blob`.
 #[test]
 fn single_layer_decrypt_blob_is_not_cipher_store_two_layer() {
     let id = unlock(root_a());

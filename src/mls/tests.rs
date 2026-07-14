@@ -3,7 +3,7 @@
 //! without first converting every partial-move call site (`state.field`, `identity.field`) in
 //! `groups.rs`/`mimi/mod.rs` to `mem::take` - a Drop-implementing type forbids moving a field
 //! out of an existing binding. The lifecycle test proves that conversion preserves the group's
-//! cryptographic behavior exactly (create/add/welcome/encrypt/decrypt/remove/regenerate all
+//! cryptographic behavior (create/add/welcome/encrypt/decrypt/remove/regenerate all
 //! round-trip), which matters because this crate otherwise has no MLS-group-flow test coverage.
 
 use super::*;
@@ -46,7 +46,7 @@ fn groupstate_drop_zeroizes_storage_values() {
     for (_, v) in &mut guard.storage_map {
         v.zeroize();
     }
-    // SAFETY: `guard` is never dropped (ManuallyDrop, deliberately leaked for this test), so the
+    // SAFETY: `guard` is never dropped (ManuallyDrop, leaked for this test), so the
     // allocation stays live and unreused; ptr/len point into it.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
     assert!(
@@ -111,7 +111,7 @@ fn mlssigner_key_wipes_on_drop() {
 /// runtime check can't offer. If `zeroizing_json` ever stopped returning `Zeroizing`, this line
 /// would fail to compile, not silently keep passing.
 ///
-/// The runtime check below deliberately uses `ManuallyDrop` (matching the other proofs in this
+/// The runtime check below uses `ManuallyDrop` (matching the other proofs in this
 /// file - never deallocates, so unambiguously race-free under `cargo test`'s parallel runner,
 /// which shares one global allocator across every test thread) over the actual bytes
 /// `zeroizing_json` produced (not a synthetic buffer), as a live-data regression check on the
@@ -196,7 +196,7 @@ fn group_lifecycle_round_trips_after_zeroize_refactor() {
 /// Regression test: a THIRD member joining must not strand an EXISTING member on
 /// a stale epoch. `group_lifecycle_round_trips_after_zeroize_refactor` above only ever adds to a
 /// 1-member group, which structurally cannot exercise this bug (there is no existing member besides
-/// the adder to strand) - that's exactly how the discarded-commit bug shipped undetected.
+/// the adder to strand) - that's how the discarded-commit bug shipped undetected.
 ///
 /// Sequence: Alice creates a group and adds Bob (2-member). Alice then adds Carol (3-member) - THIS
 /// is the commit that must reach Bob, who was not part of that operation. Bob explicitly processes
@@ -204,7 +204,7 @@ fn group_lifecycle_round_trips_after_zeroize_refactor() {
 /// path now does over the wire). Proof of sync: Alice encrypts in the post-Carol epoch and Bob
 /// decrypts it. Before the fix, this test would not compile (arity); with the fix reverted to
 /// discard the commit (i.e. `_commit` instead of `commit`), Bob's decrypt fails with an epoch/secret
-/// mismatch - exactly the production failure this test guards against.
+/// mismatch - the production failure this test guards against.
 #[test]
 fn add_member_commit_keeps_existing_member_in_sync_three_party() {
     let now = now_secs();
@@ -558,7 +558,7 @@ mod suite_gate {
         let validated_kp = key_package
             .validate(provider.crypto(), ProtocolVersion::Mls10)
             .unwrap();
-        // NOTE: deliberately NO gate_inbound_keypackage here - that is the whole point (hostile peer).
+        // NOTE: NO gate_inbound_keypackage here - that is the whole point (hostile peer).
         let (_commit, welcome, _gi) = group
             .add_members(&provider, &signer, &[validated_kp])
             .unwrap();
