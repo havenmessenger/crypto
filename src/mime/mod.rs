@@ -115,7 +115,7 @@ impl MimeParsed {
 
 /// Parse a decrypted MIME (or raw-text) payload into `{ body, html_body,
 /// attachments[] }`. Mirrors the NON-JSON branches of the client's own decrypted-
-/// payload parser exactly (a separate JSON-draft branch stays in the client - it
+/// payload parser (a separate JSON-draft branch stays in the client - it
 /// is a Haven-internal JSON format, not MIME). FAIL-CLOSED + no-panic.
 pub fn parse(input: &str) -> Result<ParsedMessage, MimeError> {
     if input.len() > MAX_INPUT_BYTES {

@@ -194,7 +194,7 @@ fn raw_signer_and_pubkey(bundle_bytes: &[u8]) -> (MlsSigner, SignaturePublicKey)
     (signer, pubkey)
 }
 
-/// Load a member's current `(GroupId, epoch)` from their serialized `GroupState` - mirrors exactly
+/// Load a member's current `(GroupId, epoch)` from their serialized `GroupState` - mirrors
 /// the load dance every `mimi_*` function does internally (fresh provider, storage_map restored,
 /// `MlsGroup::load`), needed here only to construct a well-formed external proposal in tests (real
 /// production code never needs to peek at the epoch from outside `mimi_accept_external_remove_proposal`
@@ -591,7 +591,7 @@ fn native_lane_group_refuses_any_external_proposal_structurally() {
 /// assertion below inspects `MlsMessageOut::body()` on the UN-serialized Commit object (to read
 /// the actual `PublicMessage`/`PrivateMessage` wire variant) - every wrapper function returns
 /// only TLS-serialized bytes, never the pre-serialization object, so this test drives openmls
-/// directly instead, exactly as `spec_capability_proof.rs` (the interop repo's sibling proof
+/// directly instead, as `spec_capability_proof.rs` (the interop repo's sibling proof
 /// module) does for its own tests.
 fn signer_and_cwk(bundle_bytes: &[u8]) -> (MlsSigner, CredentialWithKey) {
     let mut identity: IdentityBundle = serde_json::from_slice(bundle_bytes).expect("valid bundle");

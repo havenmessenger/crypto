@@ -11,12 +11,12 @@
 //!   INV-MLS-002's accept-clause from *emergent* (we relied on openmls rejecting cross-suite Adds
 //!   + on never holding a foreign `KeyPackage`) to *explicit + first-class*. WHY: INV-MLS-002.
 //!
-//! Today generation is single-suite 0x0001 and the accepted-set is exactly `{0x0001}`, so the
-//! gate's decisions are byte-for-byte identical to the prior emergent behavior - a strengthening,
-//! not a behavior change. The seam exists precisely so a *future* 2nd suite (PQ) is a config
-//! change here; the moment the accepted-set has >1 member the emergent guarantee evaporates and
-//! this explicit gate becomes the sole guarantor - which is why it is built now, additively, and
-//! KAT-pinned on the real receive path.
+//! Generation and the accepted set are both `{0x0001}`, so the gate's decisions match the prior
+//! emergent behavior byte-for-byte. This makes the accept-pin explicit without changing behavior.
+//! The seam exists so a *future* 2nd suite (PQ) is a config change here; the moment the
+//! accepted-set has >1 member the emergent guarantee evaporates and this explicit gate becomes the
+//! sole guarantor, which is why it is built now, additively, and KAT-pinned on the real receive
+//! path.
 //!
 //! These accessors/gates are `pub(crate)` - internal seam helpers, never FRB-exposed to Dart.
 
@@ -39,9 +39,9 @@ pub const fn mls_generation_suite() -> Ciphersuite {
     MLS_GENERATION_SUITE
 }
 
-/// The MLS ciphersuite(s) Haven ACCEPTS on inbound, as u16 wire values. Today: exactly `{0x0001}`.
+/// The MLS ciphersuite(s) Haven ACCEPTS on inbound, as u16 wire values. Today: `{0x0001}`.
 /// The accept-gate compares against this set. When a future suite is added (PQ), it joins here AND
-/// `mls_generation_suite()` - a deliberate, KAT-gated, two-sided wire event (INV-MLS-002).
+/// `mls_generation_suite()` - a KAT-gated, two-sided wire event (INV-MLS-002).
 pub const MLS_ACCEPTED_SUITE_U16: u16 = 0x0001;
 
 /// Lockstep value with `mimi_core::gate::HAVEN_MLS_CIPHERSUITE_U16` (0x0001). mimi-core has no

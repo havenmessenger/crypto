@@ -598,7 +598,7 @@ pub fn pgp_sign_and_encrypt(
 }
 
 /// Impl of `pgp_verify` (rich doc on the delegator). Pure signature-validity check over whatever
-/// content `signed_armored` itself carries - it deliberately takes no expected-message parameter,
+/// content `signed_armored` itself carries - it takes no expected-message parameter,
 /// because a signature-validity check that silently ignored such a parameter would let a
 /// signature over `"A"` verify `true` even when the caller expected `"B"`. A caller that needs
 /// "valid AND matches this exact content" must use [`pgp_verify_extract`] and compare its `Some(_)`

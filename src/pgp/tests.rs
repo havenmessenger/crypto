@@ -91,7 +91,7 @@ fn tampered_ciphertext_near_end_fails_closed_mdc_check() {
 
     // Find the LAST non-delimiter, non-empty body line (the checksum line, if present, is
     // "=xxxx" - 5 chars - skip anything that short so the flip lands in real packet data, not the
-    // CRC24 checksum line, which this test deliberately does not target).
+    // CRC24 checksum line, which this test does not target).
     let target_idx = tampered_lines
         .iter()
         .enumerate()
@@ -819,7 +819,7 @@ fn pgp_encrypt_refuses_on_signing_only_recipient() {
 }
 
 /// The happy-path control for the two refusal tests above: an all-good, all-encryption-capable
-/// recipient set must still succeed exactly as before (no regression on the passing path).
+/// recipient set must still succeed as before (no regression on the passing path).
 #[test]
 fn pgp_encrypt_still_succeeds_with_all_good_recipients() {
     let (pub1, priv1) = pgp_generate_key(
