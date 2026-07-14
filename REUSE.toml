@@ -1,0 +1,25 @@
+version = 1
+
+# REUSE (https://reuse.software) dir-level licensing metadata for files that cannot carry an
+# inline SPDX header comment (or where a per-file header pass hasn't landed yet). Per-file
+# `SPDX-License-Identifier`/`SPDX-FileCopyrightText` headers on `src/*.rs` are a separate,
+# later pass (see CONTRIBUTING.md / the OSS root-file dispatch this scaffold shipped with) -
+# `src/**/*.rs` is deliberately NOT covered here, so `reuse lint` correctly still flags it until
+# that pass lands.
+
+[[annotations]]
+path = [
+  "LICENSE",
+  "LICENSES/**",
+  "Cargo.lock",
+  ".gitignore",
+  ".cargo/**",
+  "**/*.md",
+  ".github/**",
+  "rust-toolchain.toml",
+  ".pre-commit-config.yaml",
+  "scripts/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 The Haven Authors"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

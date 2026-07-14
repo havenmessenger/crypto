@@ -4,6 +4,8 @@ Haven is a privacy and security product. Coordinated disclosure from security re
 is welcome.
 
 ## Reporting a vulnerability
+- **GitHub Security Advisories:** you can also report privately via this repository's
+  [Security Advisories](https://github.com/havenmessenger/crypto/security/advisories/new) tab.
 - **Email:** security@havenmessenger.com
 - **Encrypted reports:** the disclosure PGP key is published at
   [`havenmessenger.com/.well-known/security.txt`](https://havenmessenger.com/.well-known/security.txt).

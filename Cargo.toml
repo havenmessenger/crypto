@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 The Haven Authors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
 # Haven crypto-core - the FRB-free, pure-Rust crypto/protocol library. A standalone answer to
 # "what is the cryptography?" with NOTHING app-specific.
 #
@@ -12,7 +15,8 @@ edition = "2021"
 rust-version = "1.96.0"
 description = "Haven's cryptographic core - OpenPGP (RFC 4880) and MLS-related primitives (RFC 9420), native + WASM, FRB-free."
 repository = "https://github.com/havenmessenger/crypto"
-license = "AGPL-3.0-only"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
 
 [lib]
 crate-type = ["rlib"]
@@ -48,9 +52,6 @@ thiserror = "2"
 lto = "thin"
 codegen-units = 1
 opt-level = 3
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
