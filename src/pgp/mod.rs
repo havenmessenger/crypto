@@ -365,10 +365,14 @@ pub fn pgp_encrypt_symmetric(plaintext: String, passphrase: String) -> anyhow::R
         .map_err(|e| anyhow::anyhow!("Armor encoding failed: {e}"))
 }
 
-/// Decrypt an armored PGP message - the actual rPGP logic, single source of truth shared by the
-/// async (native) and sync (web) FRB entry points. NOT exposed to Dart directly.
+/// Decrypt an armored PGP message. Does not check any embedded signature - the returned plaintext
+/// is authenticated only against the SEIPDv1 integrity tag (tamper-evident), not against the
+/// claimed sender. A message an attacker encrypted to the recipient's own public key, unsigned,
+/// decrypts here exactly the same as a legitimately signed one. Use
+/// [`pgp_decrypt_and_verify_strict_impl`] when the caller needs to know who sent the message, not
+/// just that it decrypted.
 #[allow(clippy::needless_pass_by_value)]
-pub fn pgp_decrypt_impl(
+pub fn pgp_decrypt_unauthenticated_impl(
     encrypted_armored: String,
     private_key_armored: String,
     passphrase: String,
@@ -395,11 +399,11 @@ pub fn pgp_decrypt_impl(
 }
 
 /// Impl of `pgp_decrypt_and_verify_impl` (rich doc on the delegator). The authenticate-on-decrypt
-/// counterpart to `pgp_sign_and_encrypt`: `pgp_decrypt_impl` alone returns whatever content was
-/// encrypted regardless of whether it carries a valid signature, so an unsigned chosen-plaintext
-/// message an attacker encrypted to the recipient's own public key comes back through the exact
-/// same shape as a legitimately signed-and-encrypted one - a caller that only calls
-/// `pgp_decrypt_impl` cannot tell the difference. This fn decrypts THEN verifies the embedded
+/// counterpart to `pgp_sign_and_encrypt`: `pgp_decrypt_unauthenticated_impl` alone returns whatever
+/// content was encrypted regardless of whether it carries a valid signature, so an unsigned
+/// chosen-plaintext message an attacker encrypted to the recipient's own public key comes back
+/// through the exact same shape as a legitimately signed-and-encrypted one - a caller that only
+/// calls `pgp_decrypt_unauthenticated_impl` cannot tell the difference. This fn decrypts THEN verifies the embedded
 /// signature against `signer_public_key_armored` before returning, so the boolean tells the caller
 /// whether what they got back is authenticated. A `false` result is a normal negative (unsigned, or
 /// signed by someone else) - only a structural failure (bad armor, bad key, decrypt failure) is
@@ -812,31 +816,60 @@ pub fn parse_public_keys(armored: &str) -> Vec<SignedPublicKey> {
 /// single-recipient key spuriously fail the completeness check.
 /// Matching whole lines (trailing `\r`/`\n` stripped, so both `\n` and `\r\n` input work)
 /// excludes the header-value case while still matching every real marker line.
+///
+/// Bounded on block count and aggregate input size (see the constants at the top of the function
+/// body) - input over either is a hard refusal (empty keys, a `blocks_found` that can never equal
+/// `keys.len()`), not a silent truncation, so the completeness contract above never gives a false
+/// pass because both sides were quietly capped to the same number.
 #[must_use]
 pub fn parse_public_keys_report(armored: &str) -> (Vec<SignedPublicKey>, usize) {
+    // Upper bounds on this function's input - generous enough for any real multi-recipient
+    // encryption, small enough to bound the work a hostile or corrupted input can force before
+    // any real parsing happens.
+    const MAX_KEY_BLOCKS: usize = 1024;
+    const MAX_AGGREGATE_ARMOR_BYTES: usize = 16 * 1024 * 1024;
+    // The forced-mismatch `blocks_found` this function returns (alongside empty `keys`) when an
+    // input exceeds either bound above.
+    const OVER_LIMIT_REFUSAL: usize = MAX_KEY_BLOCKS + 1;
+
+    if armored.len() > MAX_AGGREGATE_ARMOR_BYTES {
+        return (Vec::new(), OVER_LIMIT_REFUSAL);
+    }
+
     let mut keys = Vec::new();
-    let mut blocks_found = 0;
+    let mut blocks_found = 0usize;
     let begin_marker = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
     let end_marker = "-----END PGP PUBLIC KEY BLOCK-----";
 
-    let mut begin_offsets = Vec::new();
-    let mut offset = 0;
+    // One pass: a block is open (`block_start = Some(offset)`) from the line where a bare BEGIN
+    // marker line starts it to the line where a bare END marker line closes it. Each block is
+    // sliced and parsed exactly once, closed, no re-scanning of already-consumed text - unlike
+    // the prior `rest.find(end_marker)` version, which re-searched from every BEGIN offset
+    // forward, worst-case quadratic in the number of BEGIN markers. Both markers require a whole
+    // matching line (trailing `\r`/`\n` stripped): rpgp accepts arbitrary `Key: value` armor
+    // headers, so a header value that happens to contain either marker string (e.g. a `Comment:`
+    // line) must not be mistaken for a real delimiter.
+    let mut block_start: Option<usize> = None;
+    let mut offset = 0usize;
     for line in armored.split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) == begin_marker {
-            begin_offsets.push(offset);
-        }
-        offset += line.len();
-    }
-
-    for start in begin_offsets {
-        blocks_found += 1;
-        let rest = &armored[start..];
-        if let Some(end_idx) = rest.find(end_marker) {
-            let key_block = &rest[..end_idx + end_marker.len()];
-            if let Ok((key, _)) = SignedPublicKey::from_armor_single(key_block.as_bytes()) {
-                keys.push(key);
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if block_start.is_none() && trimmed == begin_marker {
+            blocks_found += 1;
+            if blocks_found > MAX_KEY_BLOCKS {
+                return (Vec::new(), OVER_LIMIT_REFUSAL);
+            }
+            block_start = Some(offset);
+        } else if let Some(start) = block_start {
+            if trimmed == end_marker {
+                let end = offset + line.len();
+                let key_block = &armored[start..end];
+                if let Ok((key, _)) = SignedPublicKey::from_armor_single(key_block.as_bytes()) {
+                    keys.push(key);
+                }
+                block_start = None;
             }
         }
+        offset += line.len();
     }
 
     (keys, blocks_found)

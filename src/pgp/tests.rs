@@ -22,7 +22,8 @@ fn tampered_ciphertext_fails_closed() {
     let ciphertext = pgp_encrypt(plaintext.into(), pub_key).unwrap();
 
     // Sanity: the untampered ciphertext decrypts correctly first.
-    let clean = pgp_decrypt_impl(ciphertext.clone(), priv_key.clone(), "passT".into());
+    let clean =
+        pgp_decrypt_unauthenticated_impl(ciphertext.clone(), priv_key.clone(), "passT".into());
     assert_eq!(
         clean.unwrap(),
         plaintext,
@@ -51,7 +52,7 @@ fn tampered_ciphertext_fails_closed() {
     assert!(tampered_any, "test must actually corrupt a body line");
     let tampered = tampered_lines.join("\n");
 
-    let result = pgp_decrypt_impl(tampered, priv_key, "passT".into());
+    let result = pgp_decrypt_unauthenticated_impl(tampered, priv_key, "passT".into());
     assert!(
         result.is_err(),
         "tampered ciphertext must fail to decrypt (fail-closed), got Ok"
@@ -79,7 +80,8 @@ fn tampered_ciphertext_near_end_fails_closed_mdc_check() {
     let plaintext = "MDC corruption target - ".repeat(200);
     let ciphertext = pgp_encrypt(plaintext.clone(), pub_key).unwrap();
 
-    let clean = pgp_decrypt_impl(ciphertext.clone(), priv_key.clone(), "passTE".into());
+    let clean =
+        pgp_decrypt_unauthenticated_impl(ciphertext.clone(), priv_key.clone(), "passTE".into());
     assert_eq!(
         clean.unwrap(),
         plaintext,
@@ -107,7 +109,7 @@ fn tampered_ciphertext_near_end_fails_closed_mdc_check() {
     tampered_lines[target_idx] = String::from_utf8_lossy(&bytes).to_string();
     let tampered = tampered_lines.join("\n");
 
-    let result = pgp_decrypt_impl(tampered, priv_key, "passTE".into());
+    let result = pgp_decrypt_unauthenticated_impl(tampered, priv_key, "passTE".into());
     assert!(
         result.is_err(),
         "corruption near the end of a long SEIPD ciphertext must still fail closed (MDC check)"
@@ -137,11 +139,11 @@ fn mixed_rsa_ecc_encrypt_decrypt() {
     let combined = format!("{pub_rsa}\n{pub_ecc}");
     let ciphertext = pgp_encrypt("Mixed test".into(), combined).unwrap();
 
-    let dec_rsa = pgp_decrypt_impl(ciphertext.clone(), priv_rsa, "passA".into());
+    let dec_rsa = pgp_decrypt_unauthenticated_impl(ciphertext.clone(), priv_rsa, "passA".into());
     assert!(dec_rsa.is_ok(), "RSA decrypt failed: {:?}", dec_rsa.err());
     assert_eq!(dec_rsa.unwrap(), "Mixed test");
 
-    let dec_ecc = pgp_decrypt_impl(ciphertext, priv_ecc, "passB".into());
+    let dec_ecc = pgp_decrypt_unauthenticated_impl(ciphertext, priv_ecc, "passB".into());
     assert!(dec_ecc.is_ok(), "ECC decrypt failed: {:?}", dec_ecc.err());
     assert_eq!(dec_ecc.unwrap(), "Mixed test");
 }
@@ -243,11 +245,11 @@ fn multikey_encrypt_decrypt() {
     let combined_pub = format!("{pub1}\n{pub2}");
     let ciphertext = pgp_encrypt("Hello, both of you!".into(), combined_pub).unwrap();
 
-    let dec1 = pgp_decrypt_impl(ciphertext.clone(), priv1, "pass1".into());
+    let dec1 = pgp_decrypt_unauthenticated_impl(ciphertext.clone(), priv1, "pass1".into());
     assert!(dec1.is_ok(), "Alice decrypt failed: {:?}", dec1.err());
     assert_eq!(dec1.unwrap(), "Hello, both of you!");
 
-    let dec2 = pgp_decrypt_impl(ciphertext, priv2, "pass2".into());
+    let dec2 = pgp_decrypt_unauthenticated_impl(ciphertext, priv2, "pass2".into());
     assert!(dec2.is_ok(), "Bob decrypt failed: {:?}", dec2.err());
     assert_eq!(dec2.unwrap(), "Hello, both of you!");
 }
@@ -305,7 +307,7 @@ fn rsa4096_primary_only_encrypt() {
 
     let ciphertext = pgp_encrypt("primary-only encrypt".into(), synthetic_pub)
         .expect("encrypt to a primary-only RSA-4096 key must not silently drop it");
-    let dec = pgp_decrypt_impl(ciphertext, synthetic_priv, "passSynth".into());
+    let dec = pgp_decrypt_unauthenticated_impl(ciphertext, synthetic_priv, "passSynth".into());
     assert_eq!(dec.unwrap(), "primary-only encrypt");
 }
 
@@ -796,6 +798,39 @@ fn pgp_encrypt_refuses_on_unterminated_recipient_block() {
     );
 }
 
+/// A batch over `parse_public_keys_report`'s internal block-count cap (1024) is a hard refusal
+/// (empty keys, a forced completeness mismatch), not a partial parse - proven with fake blocks
+/// (garbage bodies), so the only way this can behave this way is the cap running before any real
+/// parsing is attempted.
+#[test]
+fn parse_public_keys_report_rejects_over_cap_block_count() {
+    let mut input = String::new();
+    for _ in 0..1025 {
+        input.push_str(
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\nx\n-----END PGP PUBLIC KEY BLOCK-----\n",
+        );
+    }
+    let (keys, blocks_found) = parse_public_keys_report(&input);
+    assert!(
+        keys.is_empty(),
+        "over the block-count cap must refuse, not partially parse"
+    );
+    assert!(
+        blocks_found > 1024,
+        "blocks_found must force a completeness mismatch, not report the real (over-cap) count"
+    );
+}
+
+/// Input over `parse_public_keys_report`'s internal aggregate-byte cap (16 MiB) is refused before
+/// any line scanning, same forced-mismatch shape as the block-count cap above.
+#[test]
+fn parse_public_keys_report_rejects_over_cap_aggregate_bytes() {
+    let oversized = "x".repeat(16 * 1024 * 1024 + 1);
+    let (keys, blocks_found) = parse_public_keys_report(&oversized);
+    assert!(keys.is_empty());
+    assert!(blocks_found > 1024);
+}
+
 /// `pgp_encrypt` given a good key alongside a signing-only key (parses fine, but has no
 /// encryption capability at all) must refuse - not silently encrypt to only the encryption-
 /// capable recipient.
@@ -841,11 +876,11 @@ fn pgp_encrypt_still_succeeds_with_all_good_recipients() {
     let ciphertext = pgp_encrypt("all good".into(), combined).expect("all-good set must succeed");
 
     assert_eq!(
-        pgp_decrypt_impl(ciphertext.clone(), priv1, "pass1".into()).unwrap(),
+        pgp_decrypt_unauthenticated_impl(ciphertext.clone(), priv1, "pass1".into()).unwrap(),
         "all good"
     );
     assert_eq!(
-        pgp_decrypt_impl(ciphertext, priv2, "pass2".into()).unwrap(),
+        pgp_decrypt_unauthenticated_impl(ciphertext, priv2, "pass2".into()).unwrap(),
         "all good"
     );
 }

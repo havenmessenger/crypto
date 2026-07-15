@@ -23,6 +23,57 @@ fn manual_seal_blob(root: &[u8], info: &[u8], plaintext: &[u8]) -> Vec<u8> {
     crate::crypto::aes_gcm_256_seal(key, plaintext.to_vec()).expect("seal")
 }
 
+// ── unlock() root-key validation ────────────────────────────────────────────
+
+#[test]
+fn unlock_rejects_wrong_length_root() {
+    assert!(unlock(vec![0u8; 31]).is_err());
+    assert!(unlock(vec![0u8; 33]).is_err());
+    assert!(unlock(Vec::new()).is_err());
+}
+
+#[test]
+fn unlock_rejects_all_zero_root() {
+    assert!(unlock(vec![0u8; 32]).is_err());
+}
+
+#[test]
+fn unlock_accepts_a_real_32_byte_root() {
+    assert!(unlock(root_a()).is_ok());
+}
+
+// ── unlock() live-session cap ────────────────────────────────────────────────
+
+/// `STORE` is a process-global registry shared with every other test in this file, so this test
+/// does not assume it starts empty - it unlocks enough MORE sessions to guarantee crossing
+/// `MAX_LIVE_SESSIONS` regardless of what else is concurrently live (parallel test execution),
+/// stopping at the first refusal, then locks everything it opened so it does not leave the
+/// registry inflated for whatever runs after it.
+#[test]
+fn unlock_refuses_past_the_live_session_cap() {
+    let mut opened = Vec::new();
+    let mut saw_refusal = false;
+    for i in 0..(MAX_LIVE_SESSIONS + 50) {
+        let mut root = vec![1u8; 32];
+        root[1..5].copy_from_slice(&(i as u32).to_le_bytes());
+        match unlock(root) {
+            Ok(id) => opened.push(id),
+            Err(SecretStoreError::TooManyLiveSessions(_)) => {
+                saw_refusal = true;
+                break;
+            }
+            Err(e) => panic!("unexpected unlock error: {e}"),
+        }
+    }
+    for id in opened {
+        lock(id);
+    }
+    assert!(
+        saw_refusal,
+        "unlock must refuse once MAX_LIVE_SESSIONS live sessions exist"
+    );
+}
+
 // ── (a) lock() zeroizes ──────────────────────────────────────────────────────
 
 /// SOUND zeroize proof, no read-after-free: zeroize the buffer IN PLACE (allocation still live) and
@@ -52,7 +103,7 @@ fn session_secrets_is_zeroize_on_drop() {
 /// op fails closed (the live object was dropped → its `ZeroizeOnDrop` ran).
 #[test]
 fn lock_removes_and_zeroizes_session() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     assert_eq!(session_count_for_test_contains(id), true);
     lock(id);
     assert_eq!(session_count_for_test_contains(id), false);
@@ -78,7 +129,7 @@ fn session_count_for_test_contains(id: SessionId) -> bool {
 /// `get_master_key(id)`-style accessor to call.)
 #[test]
 fn handle_yields_no_raw_key_only_operations() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let info = b"haven-cipher-store-blob:contract".to_vec();
     let wire = manual_seal_blob(&root_a(), &info, b"only ops, never keys");
     let out = decrypt_blob(id, info, wire).expect("op via token works");
@@ -92,8 +143,8 @@ fn handle_yields_no_raw_key_only_operations() {
 
 #[test]
 fn sessions_are_isolated() {
-    let a = unlock(root_a());
-    let b = unlock(root_b());
+    let a = unlock(root_a()).unwrap();
+    let b = unlock(root_b()).unwrap();
     assert_ne!(a, b, "distinct session tokens");
 
     let info = b"haven-cipher-store-blob:shared-name".to_vec();
@@ -118,7 +169,7 @@ fn sessions_are_isolated() {
 
 #[test]
 fn decrypt_blob_round_trip() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let info = b"haven-cipher-store-blob:msg-42".to_vec();
     let plain = b"the quick brown fox";
     let wire = manual_seal_blob(&root_a(), &info, plain);
@@ -128,7 +179,7 @@ fn decrypt_blob_round_trip() {
 
 #[test]
 fn decrypt_blob_batch_round_trip_and_partial_failure() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let i1 = b"haven-cipher-store-blob:a".to_vec();
     let i2 = b"haven-cipher-store-blob:b".to_vec();
     let w1 = manual_seal_blob(&root_a(), &i1, b"one");
@@ -155,7 +206,7 @@ fn decrypt_blob_batch_round_trip_and_partial_failure() {
 
 #[test]
 fn ops_fail_closed_after_lock() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     lock(id);
     let info = b"haven-cipher-store-blob:k".to_vec();
     let wire = manual_seal_blob(&root_a(), &info, b"x");
@@ -175,7 +226,7 @@ fn ops_fail_closed_after_lock() {
 
 #[test]
 fn lock_is_idempotent() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     lock(id);
     lock(id); // no panic, no-op
     lock(fresh_id_for_test()); // locking a never-seen id is a no-op
@@ -187,7 +238,7 @@ fn fresh_id_for_test() -> SessionId {
 
 #[test]
 fn pgp_decrypt_fails_closed_without_identity() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     assert!(matches!(
         pgp_decrypt(id, "anything".to_string()),
         Err(SecretStoreError::NoPgpIdentity)
@@ -202,7 +253,7 @@ fn pgp_round_trip_via_handle() {
     let (public_armored, private_armored) =
         crate::pgp::pgp_generate_key("T".into(), "t@e.x".into(), "pw".into(), "ecc".into())
             .expect("keygen");
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     set_pgp_identity(id, private_armored, "pw".into()).expect("set identity");
 
     let ct = crate::pgp::pgp_encrypt("hello pgp".into(), public_armored).expect("encrypt");
@@ -225,7 +276,7 @@ fn set_pgp_identity_replace_wipes_old_identity() {
         crate::pgp::pgp_generate_key("New".into(), "new@e.x".into(), "pwNew".into(), "ecc".into())
             .expect("keygen new");
 
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     set_pgp_identity(id, priv_old, "pwOld".into()).expect("set old identity");
     let ct_old = crate::pgp::pgp_encrypt("for old".into(), pub_old).expect("encrypt to old");
 
@@ -267,7 +318,7 @@ fn manual_seal_cipher_store_blob(root: &[u8], blob_key_name: &str, plaintext: &[
 
 #[test]
 fn decrypt_cipher_store_blob_two_layer_round_trip() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let plain = b"two-layer round trip";
     let wire = manual_seal_cipher_store_blob(&root_a(), "mls_identity", plain);
     assert_eq!(
@@ -280,7 +331,7 @@ fn decrypt_cipher_store_blob_two_layer_round_trip() {
 /// The inner `cipher_store_root_key` is derived once + cached as a subkey.
 #[test]
 fn cipher_store_root_is_cached_after_first_op() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     // Before any cipher_store op the subkey is absent…
     assert!(super::store()
         .get(&id)
@@ -300,7 +351,7 @@ fn cipher_store_root_is_cached_after_first_op() {
 
 #[test]
 fn decrypt_cipher_store_blob_batch_round_trip_and_partial_failure() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let w1 = manual_seal_cipher_store_blob(&root_a(), "a", b"one");
     let w2 = manual_seal_cipher_store_blob(&root_a(), "b", b"two");
     let bad = vec![0u8; 40];
@@ -327,7 +378,7 @@ fn decrypt_cipher_store_blob_batch_round_trip_and_partial_failure() {
 /// This is why the cipher-store needed its own dedicated two-layer op, not `decrypt_blob`.
 #[test]
 fn single_layer_decrypt_blob_is_not_cipher_store_two_layer() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let wire = manual_seal_cipher_store_blob(&root_a(), "k", b"secret");
     // The two-layer op opens it…
     assert_eq!(
@@ -344,7 +395,7 @@ fn single_layer_decrypt_blob_is_not_cipher_store_two_layer() {
 
 #[test]
 fn cipher_store_ops_fail_closed_after_lock() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     lock(id);
     let wire = manual_seal_cipher_store_blob(&root_a(), "k", b"x");
     assert!(matches!(
@@ -386,7 +437,7 @@ fn manual_seal_vault_blob(root: &[u8], blob_type: &str, plaintext: &[u8]) -> Vec
 
 #[test]
 fn decrypt_vault_blob_round_trip_across_types() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     for blob_type in ["email", "mls_chat", "file", "index"] {
         let plain = format!("vault payload for {blob_type}").into_bytes();
         let wire = manual_seal_vault_blob(&root_a(), blob_type, &plain);
@@ -402,7 +453,7 @@ fn decrypt_vault_blob_round_trip_across_types() {
 /// The vault master key is derived once + cached as a subkey.
 #[test]
 fn vault_master_key_is_cached_after_first_op() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     assert!(super::store()
         .get(&id)
         .expect("session")
@@ -420,7 +471,7 @@ fn vault_master_key_is_cached_after_first_op() {
 
 #[test]
 fn vault_decrypt_fails_closed_on_bad_version_and_short_wire() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let mut wire = manual_seal_vault_blob(&root_a(), "email", b"hello");
     // Flip the version prefix 1 → 2 → unsupported.
     wire[3] = 2;
@@ -439,7 +490,7 @@ fn vault_decrypt_fails_closed_on_bad_version_and_short_wire() {
 /// The wrong blob TYPE derives a different sub_key → tag mismatch (per-type isolation, fail-closed).
 #[test]
 fn vault_wrong_type_fails_closed() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let wire = manual_seal_vault_blob(&root_a(), "email", b"typed secret");
     assert_eq!(
         decrypt_vault_blob(id, "email", wire.clone()).expect("right type opens"),
@@ -454,7 +505,7 @@ fn vault_wrong_type_fails_closed() {
 
 #[test]
 fn vault_op_fails_closed_after_lock() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     lock(id);
     let wire = manual_seal_vault_blob(&root_a(), "email", b"x");
     assert!(matches!(
@@ -472,7 +523,7 @@ fn vault_op_fails_closed_after_lock() {
 
 #[test]
 fn seal_cipher_store_blob_round_trip_across_sizes() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     for plain in [
         Vec::new(),    // empty payload → wire = nonce(12)‖tag(16)
         b"x".to_vec(), // single byte
@@ -495,7 +546,7 @@ fn seal_cipher_store_blob_round_trip_across_sizes() {
 /// op (different random nonces, identical key).
 #[test]
 fn seal_cipher_store_blob_matches_canonical_derivation() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let plain = b"canonical match".to_vec();
     let prod_wire = seal_cipher_store_blob(id, "k", plain.clone()).expect("prod seal");
     let manual_wire = manual_seal_cipher_store_blob(&root_a(), "k", &plain);
@@ -512,7 +563,7 @@ fn seal_cipher_store_blob_matches_canonical_derivation() {
 
 #[test]
 fn seal_vault_blob_round_trip_across_types_and_sizes() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     for blob_type in ["email", "mls_chat", "file", "index"] {
         for plain in [
             Vec::new(),
@@ -537,7 +588,7 @@ fn seal_vault_blob_round_trip_across_types_and_sizes() {
 /// plaintext via the production decrypt op.
 #[test]
 fn seal_vault_blob_matches_canonical_derivation() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     let plain = b"vault canonical match".to_vec();
     let prod_wire = seal_vault_blob(id, "email", plain.clone()).expect("prod seal");
     let manual_wire = manual_seal_vault_blob(&root_a(), "email", &plain);
@@ -554,7 +605,7 @@ fn seal_vault_blob_matches_canonical_derivation() {
 
 #[test]
 fn seal_ops_fail_closed_after_lock() {
-    let id = unlock(root_a());
+    let id = unlock(root_a()).unwrap();
     lock(id);
     assert!(matches!(
         seal_cipher_store_blob(id, "k", b"x".to_vec()),

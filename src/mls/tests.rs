@@ -9,8 +9,9 @@
 use super::*;
 use crate::identity::generate_identity;
 use crate::mls::groups::{
-    add_member, create_group, decrypt_message, encrypt_message, mls_extract_signature_key,
-    mls_process_commit, process_welcome, regenerate_key_package, remove_member_by_credential,
+    add_member, add_members_bulk, create_group, decrypt_message, encrypt_message,
+    mls_extract_signature_key, mls_process_commit, process_welcome, regenerate_key_package,
+    remove_member_by_credential, MAX_BULK_AGGREGATE_BYTES, MAX_BULK_MEMBERS,
 };
 use std::mem::ManuallyDrop;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -727,4 +728,33 @@ fn inbound_wire_deserializers_reject_hostile_bytes_without_panic() {
             "mimi_process_welcome must reject hostile input #{i} with Err, not panic/Ok"
         );
     }
+}
+
+// ── add_members_bulk: batch-cardinality bound ───────────────────────────────
+
+/// A batch over `MAX_BULK_MEMBERS` is refused before any group-state deserialization is
+/// attempted - proven with garbage `group_state_bytes`/`bundle_bytes` (empty, would fail
+/// deserialization anyway), so the only way this can return `Err` for the RIGHT reason is the
+/// cardinality check running first.
+#[test]
+fn add_members_bulk_rejects_over_cap_member_count() {
+    let too_many = vec![vec![0u8; 8]; MAX_BULK_MEMBERS + 1];
+    let result = add_members_bulk(Vec::new(), Vec::new(), too_many);
+    assert!(
+        result.is_err(),
+        "a batch over the member-count cap must be refused"
+    );
+}
+
+/// A batch within the member-count cap but over the aggregate-byte cap is also refused, same
+/// fail-fast-before-deserialization shape as the count check above.
+#[test]
+fn add_members_bulk_rejects_over_cap_aggregate_bytes() {
+    let big_item_len = (MAX_BULK_AGGREGATE_BYTES / 4) + 1;
+    let four_big_items = vec![vec![0u8; big_item_len]; 4];
+    let result = add_members_bulk(Vec::new(), Vec::new(), four_big_items);
+    assert!(
+        result.is_err(),
+        "a batch over the aggregate-byte cap must be refused"
+    );
 }

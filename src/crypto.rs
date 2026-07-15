@@ -89,6 +89,13 @@ pub fn pbkdf2_sha256(
     Ok(okm)
 }
 
+/// Upper bound on PBKDF2 iterations. Haven's own production derivation runs at 210,000
+/// (`INV-KEY-001`); this cap leaves an order of magnitude of headroom for a legitimate caller
+/// tuning for slower/faster hardware while still bounding the CPU time an unbounded value could
+/// force (unlike `output_bytes`, iterations has no allocation to cap - the risk here is wall-clock
+/// time, not memory).
+const MAX_PBKDF2_ITERATIONS: u32 = 2_000_000;
+
 /// A missing/zero `iterations` must fail closed, not silently compute a one-iteration key
 /// (under the pinned PBKDF2 implementation, zero rounds still runs the initial U1 block rather
 /// than erroring). `output_bytes` is capped at the same RFC 5869-derived ceiling the HKDF fns in
@@ -98,6 +105,11 @@ pub fn pbkdf2_sha256(
 fn validate_pbkdf2_params(iterations: u32, output_bytes: u32) -> anyhow::Result<()> {
     if iterations == 0 {
         anyhow::bail!("PBKDF2: iterations must be > 0");
+    }
+    if iterations > MAX_PBKDF2_ITERATIONS {
+        anyhow::bail!(
+            "PBKDF2: iterations {iterations} exceeds the sane cap ({MAX_PBKDF2_ITERATIONS})"
+        );
     }
     if output_bytes == 0 {
         anyhow::bail!("PBKDF2: output_bytes must be > 0");
@@ -343,15 +355,24 @@ pub fn bip39_validate(phrase: String) -> bool {
     bip39::Mnemonic::parse_in_normalized(bip39::Language::English, &phrase).is_ok()
 }
 
+/// Upper bound on `random_bytes_secure`'s requested length. The largest real caller requests 32
+/// bytes; this cap bounds the allocation an unbounded `len` (up to `u32::MAX`, ~4 GiB) could force
+/// while leaving generous headroom for any legitimate key-material size.
+const MAX_RANDOM_BYTES_LEN: u32 = 65536;
+
 /// Generate `len` cryptographically-secure random bytes from `OsRng` - the single Rust-stack
 /// key-material generator (secret KEY material only - nonce/salt generation stays in the
 /// client's Dart layer by design).
-#[must_use]
-pub fn random_bytes_secure(len: u32) -> Vec<u8> {
+pub fn random_bytes_secure(len: u32) -> anyhow::Result<Vec<u8>> {
     use rand::RngCore;
+    if len > MAX_RANDOM_BYTES_LEN {
+        anyhow::bail!(
+            "random_bytes_secure: len {len} exceeds the sane cap ({MAX_RANDOM_BYTES_LEN})"
+        );
+    }
     let mut bytes = vec![0u8; len as usize];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes
+    Ok(bytes)
 }
 
 /// HMAC-SHA256(key, msg) → 32-byte digest. Used as the subkey-derivation primitive in the
@@ -1001,17 +1022,31 @@ mod tests {
     /// `random_bytes_secure` returns exactly the requested length.
     #[test]
     fn random_bytes_secure_returns_requested_length() {
-        assert_eq!(random_bytes_secure(32).len(), 32);
-        assert_eq!(random_bytes_secure(0).len(), 0);
-        assert_eq!(random_bytes_secure(16).len(), 16);
+        assert_eq!(random_bytes_secure(32).unwrap().len(), 32);
+        assert_eq!(random_bytes_secure(0).unwrap().len(), 0);
+        assert_eq!(random_bytes_secure(16).unwrap().len(), 16);
     }
 
     /// Two calls must produce distinct output (OsRng, not a fixed/zeroed buffer).
     #[test]
     fn random_bytes_secure_calls_differ() {
-        let a = random_bytes_secure(32);
-        let b = random_bytes_secure(32);
+        let a = random_bytes_secure(32).unwrap();
+        let b = random_bytes_secure(32).unwrap();
         assert_ne!(a, b, "OsRng generation must differ");
         assert_ne!(a, vec![0u8; 32], "must not be the trivially-zero buffer");
+    }
+
+    /// A `len` past the sane cap is refused, not allocated.
+    #[test]
+    fn random_bytes_secure_rejects_over_cap_len() {
+        assert!(random_bytes_secure(MAX_RANDOM_BYTES_LEN + 1).is_err());
+        assert!(random_bytes_secure(MAX_RANDOM_BYTES_LEN).is_ok());
+    }
+
+    /// A PBKDF2 iteration count past the sane cap is refused.
+    #[test]
+    fn pbkdf2_sha256_rejects_over_cap_iterations() {
+        assert!(pbkdf2_sha256("pw".into(), "salt".into(), MAX_PBKDF2_ITERATIONS + 1, 32).is_err());
+        assert!(pbkdf2_sha256("pw".into(), "salt".into(), 210_000, 32).is_ok());
     }
 }

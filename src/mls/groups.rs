@@ -385,6 +385,13 @@ pub fn add_member(
     Ok((new_group_state.to_vec(), combined_welcome, commit_bytes))
 }
 
+/// Upper bounds on `add_members_bulk`'s batch, generous for any real single-commit add and small
+/// enough to bound the aggregate KeyPackage-validation + HPKE-seal work one call can force.
+/// `check_wire_size` already caps each individual KeyPackage (`MAX_MLS_WIRE_BYTES`); that per-item
+/// check does not bound the batch as a whole, which is what these two constants are for.
+pub(crate) const MAX_BULK_MEMBERS: usize = 256;
+pub(crate) const MAX_BULK_AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Add multiple members to the MLS group in a single commit using their KeyPackages.
 /// Returns (newGroupState, combinedWelcomeBytes, commitBytes) - same Welcome is valid for all
 /// added members. The Commit is additive (see `add_member`'s doc for the distribution
@@ -394,6 +401,20 @@ pub fn add_members_bulk(
     bundle_bytes: Vec<u8>,
     key_packages_bytes: Vec<Vec<u8>>,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    if key_packages_bytes.len() > MAX_BULK_MEMBERS {
+        anyhow::bail!(
+            "add_members_bulk: {} KeyPackages exceeds the {MAX_BULK_MEMBERS}-member batch cap",
+            key_packages_bytes.len()
+        );
+    }
+    let aggregate_bytes: usize = key_packages_bytes.iter().map(Vec::len).sum();
+    if aggregate_bytes > MAX_BULK_AGGREGATE_BYTES {
+        anyhow::bail!(
+            "add_members_bulk: {aggregate_bytes} aggregate bytes exceeds the \
+             {MAX_BULK_AGGREGATE_BYTES}-byte batch cap"
+        );
+    }
+
     // Wrap both owned secret-bearing inputs on entry (see
     // regenerate_key_package's comment). key_packages_bytes are public KeyPackages - not
     // secret.

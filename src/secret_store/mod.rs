@@ -72,6 +72,17 @@ pub enum SecretStoreError {
     /// The underlying HKDF / AES-GCM / PGP op failed (bad tag, malformed wire, wrong passphrase…).
     #[error("crypto operation failed: {0}")]
     Crypto(String),
+    /// `unlock`'s root key failed validation (wrong length or all-zero) - not a key any real
+    /// derivation (HKDF/PBKDF2) could plausibly produce, so almost certainly caller misuse.
+    #[error("invalid master root key: {0}")]
+    InvalidRootKey(&'static str),
+    /// `unlock` was called while the process already holds `MAX_LIVE_SESSIONS` live sessions - a
+    /// caller that never pairs `unlock` with `lock` (the RAII lifecycle obligation this module's
+    /// design docs require) grows the registry, and every entry is live key material, without
+    /// bound. Refusing here caps that growth structurally instead of leaving it as an unenforced
+    /// convention.
+    #[error("too many live sessions ({0} already unlocked, cap is {MAX_LIVE_SESSIONS})")]
+    TooManyLiveSessions(usize),
 }
 
 /// The custodied secret material for ONE session. Every field is a heap secret; the derived
@@ -129,13 +140,45 @@ fn fresh_id() -> SessionId {
     u128::from_le_bytes(b)
 }
 
+/// The only key length `unlock` accepts - the byte width of every real root key this crate's own
+/// derivations (`crypto::pbkdf2_sha256`, HKDF) produce.
+const MASTER_ROOT_KEY_LEN: usize = 32;
+
+/// Upper bound on simultaneously live (unlocked, not yet locked) sessions. This module's design
+/// docs already state the lifecycle obligation - the client hands in a root key ONCE (`unlock`)
+/// and MUST call `lock` on logout/account-switch (`INV-SESSION-SCOPE-001`) - but that obligation
+/// is a convention, not something the type system enforces. A caller that never pairs `unlock`
+/// with `lock` grows this registry without bound, and every entry is live key material sitting in
+/// process memory. This cap turns that failure mode into an explicit refusal instead of unbounded
+/// growth. Real usage never approaches this: Haven's own client holds at most a handful of live
+/// sessions (one per logged-in account) at once.
+const MAX_LIVE_SESSIONS: usize = 64;
+
 /// Custody the already-derived session root key; return its opaque token. This module owns
 /// custody of the already-derived key, not the passphrase→key derivation itself; the caller
 /// derives the key and hands it in once. The input `Vec<u8>` is MOVED into the store (no copy).
-#[must_use]
-pub fn unlock(master_root_key: Vec<u8>) -> SessionId {
+///
+/// Rejects a key that is not exactly 32 bytes or is all-zero - neither shape is a key any real
+/// derivation could plausibly produce, so accepting either would silently custody garbage instead
+/// of failing where the caller's mistake actually happened. Also rejects a new session once
+/// `MAX_LIVE_SESSIONS` are already live - see that constant's doc for why.
+pub fn unlock(master_root_key: Vec<u8>) -> Result<SessionId, SecretStoreError> {
+    if master_root_key.len() != MASTER_ROOT_KEY_LEN {
+        return Err(SecretStoreError::InvalidRootKey(
+            "master root key must be exactly 32 bytes",
+        ));
+    }
+    if master_root_key.iter().all(|&b| b == 0) {
+        return Err(SecretStoreError::InvalidRootKey(
+            "master root key must not be all-zero",
+        ));
+    }
+    let mut s = store();
+    if s.len() >= MAX_LIVE_SESSIONS {
+        return Err(SecretStoreError::TooManyLiveSessions(s.len()));
+    }
     let id = fresh_id();
-    store().insert(
+    s.insert(
         id,
         SessionSecrets {
             master_root_key,
@@ -145,7 +188,8 @@ pub fn unlock(master_root_key: Vec<u8>) -> SessionId {
             pgp_passphrase: None,
         },
     );
-    id
+    drop(s);
+    Ok(id)
 }
 
 /// Populate this session's PGP identity (armored private key + at-rest passphrase). Fails closed if
@@ -488,12 +532,12 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<Vec<u8>, SecretStoreError> {
 }
 
 /// Decrypt an armored PGP message with the session's custodied PGP identity. Fails closed if no
-/// identity was set. Delegates to the proven `pgp_decrypt_impl` (the privkey + passphrase never
-/// leave Rust).
+/// identity was set. Delegates to `pgp_decrypt_unauthenticated_impl` (the privkey + passphrase
+/// never leave Rust) - does not check any embedded signature, same caveat as that function.
 pub fn pgp_decrypt(id: SessionId, encrypted_armored: String) -> Result<String, SecretStoreError> {
     // Extract the PGP identity and DROP the registry lock before the (slower) PGP decrypt - the
-    // global custody mutex must not be held across rPGP work. `pgp_decrypt_impl` re-wraps the
-    // passphrase in `Zeroizing`, so the moved clone wipes there.
+    // global custody mutex must not be held across rPGP work. `pgp_decrypt_unauthenticated_impl`
+    // re-wraps the passphrase in `Zeroizing`, so the moved clone wipes there.
     let (priv_armored, passphrase) = {
         let s = store();
         let entry = s.get(&id).ok_or(SecretStoreError::NoSuchSession)?;
@@ -510,6 +554,6 @@ pub fn pgp_decrypt(id: SessionId, encrypted_armored: String) -> Result<String, S
         drop(s); // release the registry lock before rPGP work (entry's borrow has ended)
         (priv_armored, passphrase)
     };
-    crate::pgp::pgp_decrypt_impl(encrypted_armored, priv_armored, passphrase)
+    crate::pgp::pgp_decrypt_unauthenticated_impl(encrypted_armored, priv_armored, passphrase)
         .map_err(|e| SecretStoreError::Crypto(e.to_string()))
 }
