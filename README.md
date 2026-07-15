@@ -10,8 +10,8 @@ inspected and verified by anyone, not taken on faith.
 
 > **Status: pre-audit, v0.1.0.** This is Haven's production cryptography, in use today. No
 > API-stability guarantee yet - this is not a general-purpose crypto library; it implements the
-> specific primitives Haven's client needs. See
-> [`havenmessenger/client`](https://github.com/havenmessenger/client) for how this crate is used.
+> specific primitives Haven's client needs. The client integration is not yet public; a runnable
+> usage example lives in this repo's own [`examples/`](examples/).
 
 ## Why use this
 - **It ships.** This is production cryptography, not a research crate. The byte-compat
@@ -67,6 +67,11 @@ No submodules, no external services, no network access beyond crates.io during t
 dependency fetch. A clean build + full test run (172 tests: known-answer vectors against
 published RFC/NIST test data, plus fail-closed and zeroize proofs) takes about two minutes on
 a typical machine. Known-answer tests are the gate for any change - see `CONTRIBUTING.md`.
+
+```sh
+cargo run --example pgp_roundtrip  # generate two keypairs, sign and encrypt a message, then
+                                    # decrypt and verify it with the strict (authenticated) API
+```
 
 Native builds (Android, iOS, desktop) use the stable toolchain pinned in
 [`rust-toolchain.toml`](rust-toolchain.toml) (currently 1.96.0, this crate's MSRV). The WASM
