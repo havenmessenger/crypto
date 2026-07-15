@@ -10,7 +10,9 @@
 //! `unwrap_used` clippy lint applies to the `--lib` surface only, which examples are outside of.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use crypto_core::pgp::{pgp_decrypt_and_verify_strict_impl, pgp_generate_key, pgp_sign_and_encrypt};
+use crypto_core::pgp::{
+    pgp_decrypt_and_verify_strict_impl, pgp_generate_key, pgp_sign_and_encrypt,
+};
 
 fn main() {
     let (alice_pub, alice_priv) = pgp_generate_key(
@@ -40,15 +42,14 @@ fn main() {
     )
     .expect("sign and encrypt");
 
-    println!("Alice signed and encrypted a message to Bob ({} bytes armored).", encrypted.len());
+    println!(
+        "Alice signed and encrypted a message to Bob ({} bytes armored).",
+        encrypted.len()
+    );
 
-    let recovered = pgp_decrypt_and_verify_strict_impl(
-        encrypted,
-        bob_priv,
-        "bob-passphrase".into(),
-        alice_pub,
-    )
-    .expect("decrypt and verify");
+    let recovered =
+        pgp_decrypt_and_verify_strict_impl(encrypted, bob_priv, "bob-passphrase".into(), alice_pub)
+            .expect("decrypt and verify");
 
     assert_eq!(recovered, plaintext);
     println!("Bob decrypted and verified the message: \"{recovered}\"");
