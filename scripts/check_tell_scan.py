@@ -57,6 +57,9 @@ EXCLUDE_FILES = {
     # guard 5's self-test fixtures deliberately contain synthetic tell-shaped text (that's how it
     # proves it catches every class) — the same self-referential exclusion as this file's own entry.
     "scripts/check_public_comment_hygiene.py",
+    # guard 6's self-test fixtures need a realistic tracker-ID/doc-path SHAPE to prove the generic
+    # patterns catch it — same self-referential exclusion as the two entries above.
+    "scripts/check_commit_message_hygiene.py",
     "scripts/oss-external-pins.txt",
     "scripts/oss-public-token-manifest.txt",
 }
