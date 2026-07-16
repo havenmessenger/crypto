@@ -25,6 +25,13 @@ repos:
         language: system
         pass_filenames: true
 
+      - id: commit-message-hygiene
+        name: Commit-message-hygiene (guard 6 — no internal review/process vocabulary in commit messages)
+        entry: python3 scripts/check_commit_message_hygiene.py
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:
