@@ -21,12 +21,25 @@ this to actually fire - wiring the hook into .pre-commit-config.yaml alone does 
 (verified: a fresh clone of this repo has no installed git hooks at all, only the framework's
 own `.sample` stubs).
 
+Invocation reality (found by testing the installed hook end-to-end, not assumed): when run
+under the `pre-commit` framework, `pre-commit`'s own `hook-impl` consumes git's raw pre-push
+stdin protocol itself (to compute which files changed, for other hooks' file-filtering) and does
+NOT forward it to this script's stdin - a naive stdin-reading implementation silently sees zero
+lines and passes every push unchecked. The framework instead exposes the computed range as the
+`PRE_COMMIT_FROM_REF`/`PRE_COMMIT_TO_REF` environment variables (set whenever the push extends
+existing remote history) - that is the real interface this script uses when run this way. Raw
+stdin is kept as a fallback only for the case this script is wired as a plain git hook directly
+(bypassing pre-commit), which this repo does not currently do; and a HEAD-only check is the last
+resort when neither interface has anything (e.g. a brand-new branch/root push, which sets
+neither ref env var and gives no stdin either).
+
 Usage:
-    check_commit_message_hygiene.py            # pre-push hook mode, reads ref lines on stdin
+    check_commit_message_hygiene.py            # pre-push hook mode (env vars, or stdin/HEAD fallback)
     check_commit_message_hygiene.py --check MSG # check one message string directly (manual use)
     check_commit_message_hygiene.py --self-test # fixture proof, see run_self_test()
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -60,15 +73,14 @@ def check_message(sha: str, message: str) -> list[str]:
     return hits
 
 
-def messages_in_range(local_sha: str, remote_sha: str) -> list[tuple[str, str]]:
+def messages_in_range(from_ref: str | None, to_ref: str) -> list[tuple[str, str]]:
     root = repo_root()
-    if remote_sha == ZERO_SHA:
-        # A new branch/tag being pushed has no remote history to diff against - check just
-        # the tip commit rather than walking its entire ancestry (which may predate this
-        # guard and isn't what's newly being introduced by this push).
-        args = ["git", "log", "-1", "--format=%H%x00%B%x03", local_sha]
+    if from_ref is None:
+        # No remote-side reference available - check just the tip commit rather than walking its
+        # entire ancestry (which may predate this guard and isn't what's newly being pushed).
+        args = ["git", "log", "-1", "--format=%H%x00%B%x03", to_ref]
     else:
-        args = ["git", "log", "--format=%H%x00%B%x03", f"{remote_sha}..{local_sha}"]
+        args = ["git", "log", "--format=%H%x00%B%x03", f"{from_ref}..{to_ref}"]
     out = subprocess.run(args, cwd=root, capture_output=True, text=True, check=True).stdout
     result = []
     for chunk in out.split("\x03"):
@@ -81,14 +93,36 @@ def messages_in_range(local_sha: str, remote_sha: str) -> list[tuple[str, str]]:
 
 def run_prepush() -> int:
     all_hits = []
-    for line in sys.stdin:
-        parts = line.split()
-        if len(parts) != 4:
-            continue
-        _local_ref, local_sha, _remote_ref, remote_sha = parts
-        if local_sha == ZERO_SHA:
-            continue  # a branch/tag delete - nothing to check
-        for sha, msg in messages_in_range(local_sha, remote_sha):
+
+    from_ref = os.environ.get("PRE_COMMIT_FROM_REF")
+    to_ref = os.environ.get("PRE_COMMIT_TO_REF")
+    if to_ref:
+        # Running under the pre-commit framework (the real, tested invocation path).
+        for sha, msg in messages_in_range(from_ref, to_ref):
+            all_hits.extend(check_message(sha, msg))
+    elif not sys.stdin.isatty():
+        # Fallback: invoked as a plain git pre-push hook, reading git's raw protocol directly.
+        found_any = False
+        for line in sys.stdin:
+            parts = line.split()
+            if len(parts) != 4:
+                continue
+            found_any = True
+            _local_ref, local_sha, _remote_ref, remote_sha = parts
+            if local_sha == ZERO_SHA:
+                continue  # a branch/tag delete - nothing to check
+            ref = None if remote_sha == ZERO_SHA else remote_sha
+            for sha, msg in messages_in_range(ref, local_sha):
+                all_hits.extend(check_message(sha, msg))
+        if not found_any:
+            # Neither interface gave us anything to check (e.g. pre-commit's own brand-new-
+            # branch/root-push case) - degrade to checking just the current tip rather than
+            # silently passing every such push.
+            for sha, msg in messages_in_range(None, "HEAD"):
+                all_hits.extend(check_message(sha, msg))
+    else:
+        # No ref env vars and no piped stdin at all (e.g. run interactively) - check HEAD only.
+        for sha, msg in messages_in_range(None, "HEAD"):
             all_hits.extend(check_message(sha, msg))
 
     if all_hits:
