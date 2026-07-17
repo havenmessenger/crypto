@@ -619,7 +619,7 @@ pub fn process_welcome(
 
     // INV-MLS-002 explicit accept-gate: refuse a foreign-suite Welcome BEFORE StagedWelcome
     // drives the HPKE-open. Without this gate, receive-side (attacker-influenced) input can
-    // reach openmls's libcrux ChaCha implementation on an unvalidated suite.
+    // reach OpenMlsRustCrypto's ChaCha implementation on an unvalidated suite.
     crate::suite_policy::gate_inbound_welcome(&welcome)?;
 
     // Deserialize ratchet tree

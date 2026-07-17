@@ -112,7 +112,7 @@ pub fn gate_inbound_keypackage(kp: &KeyPackage) -> anyhow::Result<()> {
 
 /// Call-site helper: gate an inbound Welcome before `StagedWelcome::new_from_welcome`. Reject if its
 /// suite ∉ accepted. Without this gate, a foreign-suite `Welcome` would otherwise reach and drive
-/// `openmls`'s libcrux ChaCha20-Poly1305 HPKE-open on an unvalidated suite.
+/// `OpenMlsRustCrypto`'s ChaCha20-Poly1305 HPKE-open on an unvalidated suite.
 pub fn gate_inbound_welcome(welcome: &Welcome) -> anyhow::Result<()> {
     gate_inbound_mls_suite(welcome_suite_u16(welcome)?)
 }
