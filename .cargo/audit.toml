@@ -45,6 +45,39 @@ ignore = [
     # BUILD-TIME proc-macro only - not present in the shipped library artifact.
     "RUSTSEC-2026-0173",
 
+    # RUSTSEC-2026-0209 - `libcrux-aesgcm` 0.0.7: AES-GCM did not enforce limits on AAD length (MEDIUM
+    # 6.3, no fixed upgrade available).
+    # RUSTSEC-2026-0211 - `libcrux-aesgcm` 0.0.7: non-constant-time authentication tag check in AES-GCM
+    # decryption (MEDIUM 6.3, no fixed upgrade available).
+    # RUSTSEC-2026-0210 - `libcrux-aesgcm` 0.0.7: unmaintained, renamed to `libcrux-aes` (warning).
+    # NON-ACTIVATED LOCKFILE PHANTOM, same class as RUSTSEC-2026-0124 above. `cargo tree -i
+    # libcrux-aesgcm` (and `-i libcrux-aead`, its only listed dependent) print NOTHING under default /
+    # --all-features / --target all - neither crate is compiled or linked. This crate's AES-GCM path
+    # runs through RustCrypto `aes-gcm` 0.10.3 via `openmls_rust_crypto` (confirmed with `cargo tree -p
+    # openmls_rust_crypto`). No upgrade or rename-follow is warranted for a crate that never compiles.
+    # Re-evaluate if the libcrux hpke-rs backend is ever activated.
+    "RUSTSEC-2026-0209",
+    "RUSTSEC-2026-0211",
+    "RUSTSEC-2026-0210",
+
+    # RUSTSEC-2026-0207 - `libcrux-sha3` 0.0.8: incorrect output of the incremental portable SHAKE API on
+    # multiple squeeze calls (HIGH 8.2, fix >=0.0.10).
+    # RUSTSEC-2026-0208 - `libcrux-sha3` 0.0.8: potential panic in the AVX2 SHAKE-256 path (HIGH 8.2, fix
+    # >=0.0.10).
+    # RUSTSEC-2026-0212 - `libcrux-secrets` 0.0.5: potentially incorrect constant-time swap/select on
+    # aarch64 (HIGH 8.2, fix >=0.0.6).
+    # COMPILED, BUT THE AFFECTED API IS NEVER CALLED. `libcrux-sha3` and `libcrux-secrets` (via
+    # `libcrux-traits`) are real dependencies of `hpke-rs`, itself a dependency of `openmls_rust_crypto` -
+    # but `hpke-rs`'s only call into either crate (`kem.rs`'s `derive_key_pair`) is confined to its
+    # X-Wing and ML-KEM key-encapsulation branches. This crate pins its ciphersuite to
+    # `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` on both generation and the accept-gates in
+    # `suite_policy.rs`, which resolves to `KemAlgorithm::DhKem25519` - a separate code path that never
+    # reaches the SHAKE call. `openmls_rust_crypto`'s own X-Wing key-encapsulation conversion is
+    # `unimplemented!()`. Re-evaluate if this crate ever adds a PQ/hybrid ciphersuite.
+    "RUSTSEC-2026-0207",
+    "RUSTSEC-2026-0208",
+    "RUSTSEC-2026-0212",
+
     # ── RETAINED DEFENSIVELY - not currently in this crate's resolved tree. Kept so a transitive
     #    re-introduction (an openmls/dep bump) stays covered without a silent regression. Prune only
     #    after confirming the dependency that would pull them in is gone for good. ──────────────────
