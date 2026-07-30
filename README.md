@@ -81,7 +81,9 @@ recipe.
 
 ## License
 Copyright 2026 The Haven Authors. Licensed under
-[AGPL-3.0-or-later](LICENSE). The interoperability library
+[AGPL-3.0-or-later](LICENSE), with an additional permission under section 7 that makes distribution
+through application distribution platforms possible — see
+[ADDITIONAL-PERMISSIONS.md](ADDITIONAL-PERMISSIONS.md). The interoperability library
 ([havenmessenger/interop](https://github.com/havenmessenger/interop)) is Apache-2.0.
 
 ## Verifying builds
