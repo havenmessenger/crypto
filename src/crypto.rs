@@ -474,6 +474,87 @@ pub mod compat {
             })
     }
 
+    /// AES-GCM-256 encrypt with a caller-supplied nonce and explicit additional authenticated
+    /// data. Returns bare `ct || tag`; the nonce and AAD remain separate caller-owned values.
+    ///
+    /// **NONCE-REUSE HAZARD:** the caller must ensure this nonce is unique for every encryption
+    /// under the same key. Reuse can reveal plaintext and the GCM authentication key, enabling
+    /// forgeries. Prefer [`super::aes_gcm_256_seal`] unless a protocol requires the nonce to be
+    /// carried separately.
+    pub fn aes_gcm_256_encrypt_caller_nonce_hazard_with_aad(
+        key: Vec<u8>,
+        nonce: Vec<u8>,
+        aad: Vec<u8>,
+        plaintext: Vec<u8>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let key = Key32::from_vec(key).map_err(|e| {
+            anyhow::anyhow!("aes_gcm_256_encrypt_caller_nonce_hazard_with_aad: {e}")
+        })?;
+        let nonce = Nonce12::from_vec(nonce).map_err(|e| {
+            anyhow::anyhow!("aes_gcm_256_encrypt_caller_nonce_hazard_with_aad: {e}")
+        })?;
+        let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|e| {
+            anyhow::anyhow!(
+                "aes_gcm_256_encrypt_caller_nonce_hazard_with_aad: key init failed: {e}"
+            )
+        })?;
+        let nonce = Nonce::from_slice(nonce.as_bytes());
+        cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &plaintext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "aes_gcm_256_encrypt_caller_nonce_hazard_with_aad: GCM encrypt failed: {e}"
+                )
+            })
+    }
+
+    /// AES-GCM-256 decrypt with a caller-supplied nonce and explicit additional authenticated
+    /// data. Input is bare `ct || tag`; the nonce and AAD must match the encryption inputs.
+    pub fn aes_gcm_256_decrypt_caller_nonce_hazard_with_aad(
+        key: Vec<u8>,
+        nonce: Vec<u8>,
+        aad: Vec<u8>,
+        ciphertext_and_tag: Vec<u8>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let key = Key32::from_vec(key).map_err(|e| {
+            anyhow::anyhow!("aes_gcm_256_decrypt_caller_nonce_hazard_with_aad: {e}")
+        })?;
+        let nonce = Nonce12::from_vec(nonce).map_err(|e| {
+            anyhow::anyhow!("aes_gcm_256_decrypt_caller_nonce_hazard_with_aad: {e}")
+        })?;
+        if ciphertext_and_tag.len() < 16 {
+            anyhow::bail!(
+                "aes_gcm_256_decrypt_caller_nonce_hazard_with_aad: ciphertext shorter than 16-byte tag ({})",
+                ciphertext_and_tag.len()
+            );
+        }
+        let cipher = Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|e| {
+            anyhow::anyhow!(
+                "aes_gcm_256_decrypt_caller_nonce_hazard_with_aad: key init failed: {e}"
+            )
+        })?;
+        let nonce = Nonce::from_slice(nonce.as_bytes());
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: &ciphertext_and_tag,
+                    aad: &aad,
+                },
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "aes_gcm_256_decrypt_caller_nonce_hazard_with_aad: GCM decrypt failed: {e}"
+                )
+            })
+    }
+
     /// AES-CTR-256 encrypt. IV is 16 bytes, counter is 128-bit BE. Stream cipher, no
     /// authentication - output length equals input length, and any bit-flip in the ciphertext
     /// silently flips the corresponding plaintext bit on decrypt.
@@ -554,6 +635,97 @@ pub mod compat {
             ct[last] ^= 0x01;
             let err = aes_gcm_256_decrypt_caller_nonce_hazard(key, nonce, ct);
             assert!(err.is_err(), "tampered tag must fail decrypt");
+        }
+
+        /// NIST SP 800-38D AES-256-GCM vector with nonce and AAD supplied separately. The
+        /// encrypted bytes are bare `ct || tag`, with no nonce prefix.
+        #[test]
+        fn aes_gcm_256_caller_nonce_aad_matches_bare_ciphertext_vector() {
+            let key =
+                hex::decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308")
+                    .unwrap();
+            let nonce = hex::decode("cafebabefacedbaddecaf888").unwrap();
+            let aad = hex::decode("feedfacedeadbeeffeedfacedeadbeefabaddad2").unwrap();
+            let plaintext = hex::decode(concat!(
+                "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72",
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+            ))
+            .unwrap();
+            let expected = hex::decode(concat!(
+                "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1a",
+                "a8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f66276fc6ece",
+                "0f4e1768cddf8853bb2d551b",
+            ))
+            .unwrap();
+
+            let ciphertext_and_tag = aes_gcm_256_encrypt_caller_nonce_hazard_with_aad(
+                key.clone(),
+                nonce.clone(),
+                aad.clone(),
+                plaintext.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                ciphertext_and_tag, expected,
+                "bare ct||tag matches the vector"
+            );
+            assert_eq!(
+                ciphertext_and_tag.len(),
+                plaintext.len() + 16,
+                "output contains ciphertext and tag, not the nonce"
+            );
+            assert_eq!(
+                aes_gcm_256_decrypt_caller_nonce_hazard_with_aad(
+                    key,
+                    nonce,
+                    aad,
+                    ciphertext_and_tag,
+                )
+                .unwrap(),
+                plaintext,
+                "separate nonce and AAD decrypt the bare ciphertext"
+            );
+        }
+
+        /// AAD is authenticated: changing it must reject the bare ciphertext.
+        #[test]
+        fn aes_gcm_256_caller_nonce_aad_rejects_wrong_aad() {
+            let key = vec![0x42; 32];
+            let nonce = vec![0x24; 12];
+            let ciphertext_and_tag = aes_gcm_256_encrypt_caller_nonce_hazard_with_aad(
+                key.clone(),
+                nonce.clone(),
+                b"message context".to_vec(),
+                b"attachment bytes".to_vec(),
+            )
+            .unwrap();
+            assert!(
+                aes_gcm_256_decrypt_caller_nonce_hazard_with_aad(
+                    key,
+                    nonce,
+                    b"different context".to_vec(),
+                    ciphertext_and_tag,
+                )
+                .is_err(),
+                "wrong AAD must fail authentication"
+            );
+        }
+
+        /// The existing sealing API continues to mint and prefix its nonce and binds empty AAD.
+        #[test]
+        fn aes_gcm_256_seal_remains_nonce_prefixed_empty_aad_wire() {
+            let key: Vec<u8> = (0u8..32).collect();
+            let plaintext = b"legacy seal wire compatibility".to_vec();
+            let wire = super::super::aes_gcm_256_seal(key.clone(), plaintext.clone()).unwrap();
+            let (nonce, ciphertext_and_tag) = wire.split_at(12);
+            let expected = aes_gcm_256_encrypt_caller_nonce_hazard_with_aad(
+                key,
+                nonce.to_vec(),
+                Vec::new(),
+                plaintext,
+            )
+            .unwrap();
+            assert_eq!(ciphertext_and_tag, expected);
         }
 
         /// AES-CTR-256 round-trip. Stream cipher - output length = input length.
