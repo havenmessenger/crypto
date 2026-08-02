@@ -564,6 +564,52 @@ pub fn remove_member_by_credential(
     ))
 }
 
+/// List the current members of the group, one uppercase-hex signature key per leaf.
+///
+/// Answers *who is in this group*, never *who may do what*. Membership is not an authority input:
+/// a caller that derives permissions from this list is reading a fact about the MLS tree as
+/// though it were a grant, and the two are unrelated.
+///
+/// The result is a function of `group_state_bytes` alone, so it describes the membership of
+/// **that** state. A caller distributing a Commit enumerates the state it committed *from*, which
+/// yields exactly the members that must receive it; enumerating the state `add_member` returns
+/// instead also counts the member who arrived with that Commit.
+///
+/// Order is the leaf order OpenMLS yields, stable for a given state.
+///
+/// Membership here is authenticated only as far as the group state is. A caller holding that
+/// state already holds the group's secrets, so this reveals nothing to a party that could not
+/// already read it — and correspondingly it is not a defence against a caller that edits its own
+/// state.
+///
+/// The signature key is returned rather than any higher-level identifier, in the same form
+/// `mls_extract_signature_key` returns it, so the mapping from key to an identity type stays in
+/// the application that defines that type.
+pub fn list_members(group_state_bytes: Vec<u8>) -> anyhow::Result<Vec<String>> {
+    // Wrap the owned input on entry (see regenerate_key_package's comment). No IdentityBundle and
+    // no signer: this path cannot produce a Commit, so it cannot mutate the group.
+    let group_state_bytes = Zeroizing::new(group_state_bytes);
+    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
+
+    let provider = OpenMlsRustCrypto::default();
+
+    {
+        let mut values = provider.storage().values.write().unwrap();
+        *values = mem::take(&mut state.storage_map).into_iter().collect();
+    }
+
+    let group_id = GroupId::from_slice(&state.group_id);
+    let group = MlsGroup::load(provider.storage(), &group_id)
+        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+
+    Ok(group
+        .members()
+        .map(|m| hex::encode_upper(m.signature_key.as_slice()))
+        .collect())
+}
+
 /// Process a Welcome message to join a group.
 /// Returns the new group state bytes.
 pub fn process_welcome(

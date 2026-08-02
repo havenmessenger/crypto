@@ -9,7 +9,7 @@
 use super::*;
 use crate::identity::generate_identity;
 use crate::mls::groups::{
-    add_member, add_members_bulk, create_group, decrypt_message, encrypt_message,
+    add_member, add_members_bulk, create_group, decrypt_message, encrypt_message, list_members,
     mls_extract_signature_key, mls_process_commit, process_welcome, regenerate_key_package,
     remove_member_by_credential, MAX_BULK_AGGREGATE_BYTES, MAX_BULK_MEMBERS,
 };
@@ -255,6 +255,149 @@ fn add_member_commit_keeps_existing_member_in_sync_three_party() {
     assert!(
         !carol_ciphertext.is_empty(),
         "Carol must be able to encrypt in her newly-joined group"
+    );
+}
+
+/// `list_members` follows an ADD. A commit distributor needs the members of the state it committed
+/// from, so the enumeration has to track the tree rather than any count the caller kept.
+///
+/// The expected keys come from each identity's own KeyPackage via `mls_extract_signature_key`,
+/// which reaches the leaf's signature key by a different route than `list_members` does (validated
+/// KeyPackage vs. loaded group state). Asserting against a value derived inside the function under
+/// test would prove only that it agrees with itself.
+#[test]
+fn list_members_reflects_add() {
+    let now = now_secs();
+    let (_ua, kp_a, bundle_a) = generate_identity("alice-la".to_string(), now).expect("alice");
+    let (_ub, kp_b, bundle_b) = generate_identity("bob-la".to_string(), now).expect("bob");
+    let (_uc, kp_c, _bundle_c) = generate_identity("carol-la".to_string(), now).expect("carol");
+
+    let key_a = mls_extract_signature_key(kp_a);
+    let key_b = mls_extract_signature_key(kp_b.clone());
+    let key_c = mls_extract_signature_key(kp_c.clone());
+
+    let state = create_group("group-list-add".to_string(), bundle_a.clone()).expect("create_group");
+
+    // One member: the creator's own leaf.
+    let solo = list_members(state.clone()).expect("list_members (solo)");
+    assert_eq!(solo, vec![key_a.clone()], "a fresh group holds its creator");
+
+    let (state, welcome_b, _commit) =
+        add_member(state, bundle_a.clone(), kp_b).expect("add_member (bob)");
+    let _state_b = process_welcome(welcome_b, bundle_b).expect("bob process_welcome");
+
+    let pair = list_members(state.clone()).expect("list_members (pair)");
+    assert_eq!(pair.len(), 2, "the added member must appear");
+    assert!(pair.contains(&key_b), "bob's signature key must be present");
+
+    let (state, _welcome_c, _commit) =
+        add_member(state, bundle_a, kp_c).expect("add_member (carol)");
+
+    let mut trio = list_members(state).expect("list_members (trio)");
+    let mut expected = vec![key_a, key_b, key_c];
+    trio.sort();
+    expected.sort();
+    assert_eq!(
+        trio, expected,
+        "the enumeration must be exactly the three leaves in the tree"
+    );
+}
+
+/// `list_members` follows a REMOVE. Both directions are needed: an implementation that only ever
+/// accumulates passes the add test and still reports a removed member as a commit recipient, which
+/// is the desync the enumeration exists to prevent.
+#[test]
+fn list_members_reflects_removal() {
+    let now = now_secs();
+    let (_ua, kp_a, bundle_a) = generate_identity("alice-lr".to_string(), now).expect("alice");
+    let (_ub, kp_b, bundle_b) = generate_identity("bob-lr".to_string(), now).expect("bob");
+
+    let key_a = mls_extract_signature_key(kp_a);
+    let key_b = mls_extract_signature_key(kp_b.clone());
+
+    let state = create_group("group-list-rm".to_string(), bundle_a.clone()).expect("create_group");
+    let (state, welcome_b, _commit) =
+        add_member(state, bundle_a.clone(), kp_b).expect("add_member (bob)");
+    let _state_b = process_welcome(welcome_b, bundle_b).expect("bob process_welcome");
+
+    let before = list_members(state.clone()).expect("list_members (before)");
+    assert!(before.contains(&key_b), "bob is present before removal");
+
+    let (state, _commit) = remove_member_by_credential(state, bundle_a, "bob-lr".to_string())
+        .expect("remove_member_by_credential");
+
+    let after = list_members(state).expect("list_members (after)");
+    assert_eq!(after, vec![key_a], "only the remaining leaf may be listed");
+    assert!(
+        !after.contains(&key_b),
+        "a removed member must not be reported as a commit recipient"
+    );
+}
+
+/// The enumeration is a property of the MLS tree, not of anything the caller chose.
+///
+/// This is the property a commit distributor rests on. A recipient list the caller supplies fans
+/// out to exactly the members the caller already knew about, so a fan-out test built on one passes
+/// while proving nothing - it cannot observe the member it failed to learn about.
+///
+/// Three independent sensors, because the structural half (the function takes no filter, ordering
+/// or recipient argument - there is no parameter through which influence could arrive) is carried
+/// by the signature and cannot be observed at run time:
+///
+/// 1. Exact set equality against keys derived from the identities themselves.
+/// 2. Repeated calls on one state agree - the result is not drawn from anything varying.
+/// 3. Two groups with DIFFERENT group ids and identical membership enumerate identically. The
+///    group id is the one caller-chosen value inside the state, so an implementation deriving the
+///    result from caller-supplied bytes rather than from the tree disagrees here and nowhere else.
+#[test]
+fn list_members_is_not_caller_influenceable() {
+    let now = now_secs();
+    let (_ua, kp_a, bundle_a) = generate_identity("alice-ni".to_string(), now).expect("alice");
+    let (_ub, kp_b, bundle_b) = generate_identity("bob-ni".to_string(), now).expect("bob");
+
+    let key_a = mls_extract_signature_key(kp_a);
+    let key_b = mls_extract_signature_key(kp_b.clone());
+
+    let state = create_group("group-not-influenceable".to_string(), bundle_a.clone())
+        .expect("create_group");
+    let (state, welcome, _commit) = add_member(state, bundle_a.clone(), kp_b).expect("add_member");
+    let _state_b = process_welcome(welcome, bundle_b).expect("bob process_welcome");
+
+    // 1. Exactly the tree's membership, derived independently of the function under test.
+    let mut listed = list_members(state.clone()).expect("list_members");
+    let mut expected = vec![key_a.clone(), key_b];
+    listed.sort();
+    expected.sort();
+    assert_eq!(
+        listed, expected,
+        "the enumeration must equal the leaves actually in the tree"
+    );
+
+    // 2. Same state in, same answer out.
+    let mut again = list_members(state).expect("list_members (repeat)");
+    again.sort();
+    assert_eq!(again, listed, "repeated calls on one state must agree");
+
+    // 3. The caller-chosen group id must not reach the result. Two groups differing ONLY in the
+    //    id the caller picked must report the same membership; an implementation sourcing its
+    //    answer from caller-supplied bytes rather than from the tree disagrees here.
+    let solo_one = list_members(
+        create_group("aaaa".to_string(), bundle_a.clone()).expect("create_group (one)"),
+    )
+    .expect("list_members (one)");
+    let solo_two = list_members(
+        create_group("a-quite-different-group-id".to_string(), bundle_a)
+            .expect("create_group (two)"),
+    )
+    .expect("list_members (two)");
+    assert_eq!(
+        solo_one,
+        vec![key_a],
+        "a solo group reports its creator's leaf key"
+    );
+    assert_eq!(
+        solo_one, solo_two,
+        "the group id is caller-chosen and must not change what the tree reports"
     );
 }
 

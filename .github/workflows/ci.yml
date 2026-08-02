@@ -9,6 +9,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets a maintainer run these checks against a branch on request, without opening a pull request
+  # to trigger them.
+  workflow_dispatch:
 
 jobs:
   check:
