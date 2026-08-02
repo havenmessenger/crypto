@@ -334,23 +334,13 @@ fn list_members_reflects_removal() {
     );
 }
 
-/// The enumeration is a property of the MLS tree, not of anything the caller chose.
+/// The enumeration equals the tree's membership, and repeating the call does not change it.
 ///
 /// This is the property a commit distributor rests on. A recipient list the caller supplies fans
 /// out to exactly the members the caller already knew about, so a fan-out test built on one passes
 /// while proving nothing - it cannot observe the member it failed to learn about.
-///
-/// Three independent sensors, because the structural half (the function takes no filter, ordering
-/// or recipient argument - there is no parameter through which influence could arrive) is carried
-/// by the signature and cannot be observed at run time:
-///
-/// 1. Exact set equality against keys derived from the identities themselves.
-/// 2. Repeated calls on one state agree - the result is not drawn from anything varying.
-/// 3. Two groups with DIFFERENT group ids and identical membership enumerate identically. The
-///    group id is the one caller-chosen value inside the state, so an implementation deriving the
-///    result from caller-supplied bytes rather than from the tree disagrees here and nowhere else.
 #[test]
-fn list_members_is_not_caller_influenceable() {
+fn list_members_matches_the_tree() {
     let now = now_secs();
     let (_ua, kp_a, bundle_a) = generate_identity("alice-ni".to_string(), now).expect("alice");
     let (_ub, kp_b, bundle_b) = generate_identity("bob-ni".to_string(), now).expect("bob");
@@ -363,9 +353,8 @@ fn list_members_is_not_caller_influenceable() {
     let (state, welcome, _commit) = add_member(state, bundle_a.clone(), kp_b).expect("add_member");
     let _state_b = process_welcome(welcome, bundle_b).expect("bob process_welcome");
 
-    // 1. Exactly the tree's membership, derived independently of the function under test.
     let mut listed = list_members(state.clone()).expect("list_members");
-    let mut expected = vec![key_a.clone(), key_b];
+    let mut expected = vec![key_a, key_b];
     listed.sort();
     expected.sort();
     assert_eq!(
@@ -373,31 +362,59 @@ fn list_members_is_not_caller_influenceable() {
         "the enumeration must equal the leaves actually in the tree"
     );
 
-    // 2. Same state in, same answer out.
     let mut again = list_members(state).expect("list_members (repeat)");
     again.sort();
     assert_eq!(again, listed, "repeated calls on one state must agree");
+}
 
-    // 3. The caller-chosen group id must not reach the result. Two groups differing ONLY in the
-    //    id the caller picked must report the same membership; an implementation sourcing its
-    //    answer from caller-supplied bytes rather than from the tree disagrees here.
-    let solo_one = list_members(
+/// The group id is the one caller-chosen value carried inside the group state, so two groups
+/// differing ONLY in it must report the same membership.
+///
+/// Kept apart from `list_members_matches_the_tree` deliberately. Folded in as a third assertion
+/// there, it sat after an equality check that panics first, so no mutation could ever reach it and
+/// its own correctness was never observed - a passing test name that proved less than it read as.
+#[test]
+fn list_members_ignores_the_caller_chosen_group_id() {
+    let now = now_secs();
+    let (_ua, kp_a, bundle_a) = generate_identity("alice-gid".to_string(), now).expect("alice");
+    let key_a = mls_extract_signature_key(kp_a);
+
+    let one = list_members(
         create_group("aaaa".to_string(), bundle_a.clone()).expect("create_group (one)"),
     )
     .expect("list_members (one)");
-    let solo_two = list_members(
+    let two = list_members(
         create_group("a-quite-different-group-id".to_string(), bundle_a)
             .expect("create_group (two)"),
     )
     .expect("list_members (two)");
+
     assert_eq!(
-        solo_one,
+        one,
         vec![key_a],
         "a solo group reports its creator's leaf key"
     );
     assert_eq!(
-        solo_one, solo_two,
+        one, two,
         "the group id is caller-chosen and must not change what the tree reports"
+    );
+}
+
+/// The enumeration accepts no filter, ordering or recipient argument - there is no parameter
+/// through which a caller could shape the answer.
+///
+/// This is the load-bearing half of "the caller cannot influence it", and it is a claim about the
+/// SIGNATURE, which no fixture can check: any implementation that returns the true membership on
+/// every fixture is already caller-independent, so a behavioural test can only ever corroborate.
+/// Coercing the function to an exact `fn` type makes the claim a compile error instead - adding a
+/// parameter, or widening the return, stops this line building.
+#[test]
+fn list_members_takes_no_caller_influence_parameter() {
+    let pinned: fn(Vec<u8>) -> anyhow::Result<Vec<String>> = list_members;
+    let err = pinned(b"not a group state".to_vec());
+    assert!(
+        err.is_err(),
+        "malformed state must be refused, not answered"
     );
 }
 
