@@ -579,8 +579,12 @@ pub fn remove_member_by_credential(
 ///
 /// Membership here is authenticated only as far as the group state is. A caller holding that
 /// state already holds the group's secrets, so this reveals nothing to a party that could not
-/// already read it — and correspondingly it is not a defence against a caller that edits its own
+/// already read it - and correspondingly it is not a defence against a caller that edits its own
 /// state.
+///
+/// No `suite_policy::gate_inbound_*` call appears here, unlike every path that takes a wire
+/// object: this one accepts no foreign KeyPackage, Welcome or Commit. It reads leaves that a
+/// gated path already admitted, so there is nothing arriving for an accept-gate to judge.
 ///
 /// The signature key is returned rather than any higher-level identifier, in the same form
 /// `mls_extract_signature_key` returns it, so the mapping from key to an identity type stays in
