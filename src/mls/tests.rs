@@ -1161,3 +1161,45 @@ fn field_clear_gate_matches_openmls_storage_key() {
         "kp_storage_key must equal the key OpenMLS stored the KeyPackage under"
     );
 }
+
+/// Storage key/value aliasing replay: a bundle can carry an alias `K_A -> B's value` alongside the
+/// genuine `K_B -> B`. OpenMLS deletes only B's canonical key `K_B` during the join, so without
+/// ingress validation the alias `K_A -> B` survives and keeps the spent KeyPackage B reachable for
+/// a later Welcome. The fix drops aliased entries (key != hash(value)) before the join, so the spent
+/// KeyPackage survives under NO key. The honest multiple-KeyPackage test cannot see this - it uses
+/// consistent key/value pairs; removing the ingress check leaves the alias surviving and reddens
+/// this assertion.
+#[test]
+fn two_secret_alias_spent_keypackage_does_not_survive() {
+    let now = now_secs();
+    let (_ua, _kpa, bundle_a) = generate_identity("alias-alice".to_string(), now).expect("alice");
+    let (_ub, kp_b, bundle_b) = generate_identity("alias-bob".to_string(), now).expect("bob");
+
+    let mut victim: IdentityBundle = serde_json::from_slice(&bundle_b).expect("bob bundle");
+    // The genuine KeyPackage entry K_B -> B.
+    let (k_b, b_value) = victim
+        .storage_map
+        .iter()
+        .find(|(k, _)| k.starts_with(b"KeyPackage"))
+        .cloned()
+        .expect("bob carries a KeyPackage storage entry");
+    // Alias: a distinct KeyPackage-labelled key pointing at B's value. Flip a byte inside the
+    // hash_ref region (before the 2-byte version suffix) so it stays well-formed but != K_B.
+    let mut k_alias = k_b.clone();
+    let flip = k_alias.len() - 3;
+    k_alias[flip] ^= 0xFF;
+    assert_ne!(k_alias, k_b, "alias key must differ from the genuine key");
+    victim.storage_map.push((k_alias, b_value.clone()));
+    let victim_bytes = serde_json::to_vec(&victim).expect("reserialize");
+
+    // A NORMAL Welcome referencing the genuine key K_B (sealed to B), consuming B.
+    let g1 = create_group("alias-g1".to_string(), bundle_a.clone()).expect("g1");
+    let (_g1, welcome1, _c1) = add_member(g1, bundle_a, kp_b).expect("add bob");
+
+    let (_state, after) = process_welcome(welcome1, victim_bytes).expect("join via genuine KP");
+    let parsed: IdentityBundle = serde_json::from_slice(&after).expect("deserialize");
+    assert!(
+        !parsed.storage_map.iter().any(|(_, v)| v == &b_value),
+        "a spent KeyPackage survived under an aliased storage key - replayable"
+    );
+}

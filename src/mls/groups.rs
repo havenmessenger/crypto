@@ -631,6 +631,20 @@ pub(crate) fn kp_storage_key(
     Ok(key)
 }
 
+/// True unless `(key, value)` is an aliased KeyPackage storage entry: a `KeyPackage`-labelled key
+/// that is not the authenticated hash of its own stored KeyPackageBundle. Non-KeyPackage entries
+/// pass through unchecked - they are not a Welcome-lookup replay vector. Fail closed: an undecodable
+/// value, or a key that does not equal the recomputed hash, is treated as an alias and rejected.
+fn kp_entry_key_matches_value(key: &[u8], value: &[u8], provider: &impl OpenMlsProvider) -> bool {
+    if !key.starts_with(b"KeyPackage") {
+        return true;
+    }
+    let Ok(bundle) = serde_json::from_slice::<KeyPackageBundle>(value) else {
+        return false;
+    };
+    kp_storage_key(bundle.key_package(), provider).is_ok_and(|k| k.as_slice() == key)
+}
+
 /// Process a Welcome message to join a group.
 ///
 /// Returns `(new_group_state, updated_bundle)`. The updated bundle is the caller's bundle with
@@ -669,7 +683,16 @@ pub fn process_welcome(
     // retires the consumed KeyPackage from the provider during new_from_welcome (single-use, RFC
     // 9420 §16.8); we diff the post-join storage against this snapshot to rebuild a bundle whose
     // spent KeyPackage material is removed.
-    let original_storage: Vec<(Vec<u8>, Vec<u8>)> = mem::take(&mut identity.storage_map);
+    let mut original_storage: Vec<(Vec<u8>, Vec<u8>)> = mem::take(&mut identity.storage_map);
+
+    // Reject aliased KeyPackage entries before OpenMLS sees them. A caller-supplied bundle can carry
+    // an alias K_A -> serialized_bundle(B) alongside the genuine K_B -> B; OpenMLS would look up
+    // K_A, open the Welcome with B, then delete only B's canonical key K_B, leaving K_A -> B alive
+    // as a live copy of a spent KeyPackage a later Welcome can replay. Every KeyPackage entry's key
+    // MUST be the authenticated hash of its own value; drop any that is not (an alias, or an
+    // undecodable value), fail closed. Non-KeyPackage entries are not a Welcome-lookup vector.
+    original_storage.retain(|(k, v)| kp_entry_key_matches_value(k, v, &provider));
+
     {
         let mut values = provider.storage().values.write().unwrap();
         *values = original_storage.iter().cloned().collect();
