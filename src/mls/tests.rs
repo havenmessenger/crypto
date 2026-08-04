@@ -1162,44 +1162,69 @@ fn field_clear_gate_matches_openmls_storage_key() {
     );
 }
 
-/// Storage key/value aliasing replay: a bundle can carry an alias `K_A -> B's value` alongside the
-/// genuine `K_B -> B`. OpenMLS deletes only B's canonical key `K_B` during the join, so without
-/// ingress validation the alias `K_A -> B` survives and keeps the spent KeyPackage B reachable for
-/// a later Welcome. The fix drops aliased entries (key != hash(value)) before the join, so the spent
-/// KeyPackage survives under NO key. The honest multiple-KeyPackage test cannot see this - it uses
-/// consistent key/value pairs; removing the ingress check leaves the alias surviving and reddens
-/// this assertion.
+/// The real two-secret `[A, B]` bulk-alias replay: a victim bundle carries an alias `K_A -> B`
+/// (a REAL other member's KeyPackage storage key pointing at B's serialized bundle) alongside the
+/// genuine `K_B -> B`. When a bulk Welcome ordered `[A, B]` is processed, OpenMLS reaches B's bundle
+/// through the alias, opens the Welcome as B, but deletes only B's CANONICAL key `K_B` (recomputed
+/// from the value) — leaving `K_A -> B` alive as a live copy of a spent KeyPackage. A second Welcome
+/// carrying B's secret would then replay B through the surviving alias.
+///
+/// The ingress filter drops any KeyPackage entry whose key is not the authenticated hash of its
+/// value (`kp_storage_key(B) == K_B != K_A`), so the alias never reaches OpenMLS: B is consumed under
+/// `K_B` alone and survives under NO key. This test is the regression SENSOR for that filter — remove
+/// the filter and the alias survives join #1, so `process_welcome` of the second `[A, B]` Welcome
+/// returns `Ok` (replay succeeds) instead of `Err`, reddening the assertion below. The prior
+/// single-member / byte-flipped / no-second-Welcome test could not exercise this: it used a fabricated
+/// alias key and never attempted the replay whose blocking is the actual guarantee.
 #[test]
-fn two_secret_alias_spent_keypackage_does_not_survive() {
+fn two_secret_bulk_alias_spent_keypackage_cannot_replay() {
     let now = now_secs();
-    let (_ua, _kpa, bundle_a) = generate_identity("alias-alice".to_string(), now).expect("alice");
-    let (_ub, kp_b, bundle_b) = generate_identity("alias-bob".to_string(), now).expect("bob");
+    // O adds the members; A and B are real KeyPackages. A exists so K_A is a genuine KeyPackage
+    // storage key and so the bulk Welcome carries an [A, B] secret ordering.
+    let (_uo, _kpo, bundle_o) = generate_identity("alias-owner".to_string(), now).expect("owner");
+    let (_ua, kp_a, bundle_a) = generate_identity("alias-a".to_string(), now).expect("a");
+    let (_ub, kp_b, bundle_b) = generate_identity("alias-b".to_string(), now).expect("b");
 
-    let mut victim: IdentityBundle = serde_json::from_slice(&bundle_b).expect("bob bundle");
-    // The genuine KeyPackage entry K_B -> B.
-    let (k_b, b_value) = victim
+    // Genuine KeyPackage entry K_B -> B from B's bundle.
+    let mut victim: IdentityBundle = serde_json::from_slice(&bundle_b).expect("b bundle");
+    let (_k_b, b_value) = victim
         .storage_map
         .iter()
         .find(|(k, _)| k.starts_with(b"KeyPackage"))
         .cloned()
-        .expect("bob carries a KeyPackage storage entry");
-    // Alias: a distinct KeyPackage-labelled key pointing at B's value. Flip a byte inside the
-    // hash_ref region (before the 2-byte version suffix) so it stays well-formed but != K_B.
-    let mut k_alias = k_b.clone();
-    let flip = k_alias.len() - 3;
-    k_alias[flip] ^= 0xFF;
-    assert_ne!(k_alias, k_b, "alias key must differ from the genuine key");
-    victim.storage_map.push((k_alias, b_value.clone()));
+        .expect("b carries a KeyPackage storage entry");
+    // K_A: A's REAL KeyPackage storage key, taken from A's own bundle.
+    let a_bundle: IdentityBundle = serde_json::from_slice(&bundle_a).expect("a bundle");
+    let (k_a, _a_value) = a_bundle
+        .storage_map
+        .iter()
+        .find(|(k, _)| k.starts_with(b"KeyPackage"))
+        .cloned()
+        .expect("a carries a KeyPackage storage entry");
+    // Inject the alias K_A -> B's value alongside the genuine K_B -> B.
+    victim.storage_map.push((k_a, b_value.clone()));
     let victim_bytes = serde_json::to_vec(&victim).expect("reserialize");
 
-    // A NORMAL Welcome referencing the genuine key K_B (sealed to B), consuming B.
-    let g1 = create_group("alias-g1".to_string(), bundle_a.clone()).expect("g1");
-    let (_g1, welcome1, _c1) = add_member(g1, bundle_a, kp_b).expect("add bob");
+    // Welcome #1: a bulk Welcome ordered [A, B] — carries B's secret; the legitimate consumption.
+    let g1 = create_group("alias-g1".to_string(), bundle_o.clone()).expect("g1");
+    let (_g1, welcome1, _c1) =
+        add_members_bulk(g1, bundle_o.clone(), vec![kp_a.clone(), kp_b.clone()]).expect("bulk 1");
+    // Welcome #2: a second bulk [A, B] Welcome, also carrying B's secret — the replay attempt.
+    let g2 = create_group("alias-g2".to_string(), bundle_o.clone()).expect("g2");
+    let (_g2, welcome2, _c2) = add_members_bulk(g2, bundle_o, vec![kp_a, kp_b]).expect("bulk 2");
 
+    // Join #1 consumes B under its canonical key; the alias is dropped at ingress by the filter.
     let (_state, after) = process_welcome(welcome1, victim_bytes).expect("join via genuine KP");
     let parsed: IdentityBundle = serde_json::from_slice(&after).expect("deserialize");
+    // Mechanism: no key (canonical or aliased) still points at the spent KeyPackage B.
     assert!(
         !parsed.storage_map.iter().any(|(_, v)| v == &b_value),
         "a spent KeyPackage survived under an aliased storage key - replayable"
+    );
+    // Consequence: the spent KeyPackage B cannot open a second Welcome. Without the ingress filter,
+    // the surviving alias K_A -> B lets OpenMLS reach B here and this returns Ok, reddening the test.
+    assert!(
+        process_welcome(welcome2, after).is_err(),
+        "the second [A, B] Welcome replayed the spent KeyPackage B through a surviving alias"
     );
 }

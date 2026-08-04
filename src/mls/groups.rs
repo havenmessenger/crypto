@@ -645,6 +645,27 @@ fn kp_entry_key_matches_value(key: &[u8], value: &[u8], provider: &impl OpenMlsP
     kp_storage_key(bundle.key_package(), provider).is_ok_and(|k| k.as_slice() == key)
 }
 
+/// Drop aliased or undecodable KeyPackage entries from a pre-join storage snapshot, zeroizing every
+/// REJECTED value before it frees. A rejected value is a serialized `KeyPackageBundle` carrying HPKE
+/// private material that has already been moved out of `IdentityBundle::storage_map`, so the bundle's
+/// own `Drop` can no longer wipe it, and `Vec::retain` would free the allocation un-zeroized. Kept
+/// entries (matching KeyPackage keys, and all non-KeyPackage entries) are returned unchanged. See
+/// `kp_entry_key_matches_value` for the accept/reject predicate.
+fn reject_aliased_kp_entries(
+    storage: Vec<(Vec<u8>, Vec<u8>)>,
+    provider: &impl OpenMlsProvider,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut kept = Vec::with_capacity(storage.len());
+    for (k, mut v) in storage {
+        if kp_entry_key_matches_value(&k, &v, provider) {
+            kept.push((k, v));
+        } else {
+            v.zeroize();
+        }
+    }
+    kept
+}
+
 /// Process a Welcome message to join a group.
 ///
 /// Returns `(new_group_state, updated_bundle)`. The updated bundle is the caller's bundle with
@@ -683,7 +704,7 @@ pub fn process_welcome(
     // retires the consumed KeyPackage from the provider during new_from_welcome (single-use, RFC
     // 9420 §16.8); we diff the post-join storage against this snapshot to rebuild a bundle whose
     // spent KeyPackage material is removed.
-    let mut original_storage: Vec<(Vec<u8>, Vec<u8>)> = mem::take(&mut identity.storage_map);
+    let original_storage: Vec<(Vec<u8>, Vec<u8>)> = mem::take(&mut identity.storage_map);
 
     // Reject aliased KeyPackage entries before OpenMLS sees them. A caller-supplied bundle can carry
     // an alias K_A -> serialized_bundle(B) alongside the genuine K_B -> B; OpenMLS would look up
@@ -691,7 +712,8 @@ pub fn process_welcome(
     // as a live copy of a spent KeyPackage a later Welcome can replay. Every KeyPackage entry's key
     // MUST be the authenticated hash of its own value; drop any that is not (an alias, or an
     // undecodable value), fail closed. Non-KeyPackage entries are not a Welcome-lookup vector.
-    original_storage.retain(|(k, v)| kp_entry_key_matches_value(k, v, &provider));
+    // reject_aliased_kp_entries zeroizes each rejected value before dropping it (freed HPKE material).
+    let original_storage = reject_aliased_kp_entries(original_storage, &provider);
 
     {
         let mut values = provider.storage().values.write().unwrap();
