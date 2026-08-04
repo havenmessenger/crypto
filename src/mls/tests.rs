@@ -638,7 +638,7 @@ mod suite_gate {
             .into_iter()
             .collect();
         let bundle = IdentityBundle {
-            key_package_bundle: kpb,
+            key_package_bundle: Some(kpb),
             private_key: priv_bytes,
             signature_scheme: scheme,
             public_key_bytes: pub_bytes,
@@ -945,11 +945,121 @@ fn a_consumed_keypackage_cannot_open_a_second_welcome() {
     let (_state1, bundle_b_after) =
         process_welcome(welcome1, bundle_b).expect("first Welcome joins");
 
+    // Retirement must remove the spent private material, not merely make it unreachable via
+    // storage_map: the bundle's key_package_bundle field carries a SECOND copy of the KeyPackage
+    // incl. its private HPKE material, and must be cleared. Deserialize and prove it is absent.
+    let parsed: IdentityBundle = serde_json::from_slice(&bundle_b_after).expect("deserialize");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "the consumed KeyPackage's private bundle must be cleared from the returned bundle, not \
+         just retired from storage_map"
+    );
+
     // The consumed KeyPackage must not open the second Welcome (single-use).
     let second = process_welcome(welcome2, bundle_b_after);
     assert!(
         second.is_err(),
         "a KeyPackage consumed by one Welcome opened a second one - RFC 9420 §16.8 single-use \
-         violated (finding #8)"
+         violated"
+    );
+}
+
+/// Build an `IdentityBundle` whose KeyPackage carries the last-resort extension. A last-resort
+/// KeyPackage is the RFC 9420 §16.8 exception to single-use: it may open more than one Welcome, so
+/// `process_welcome` must NOT retire it. Test-only.
+fn last_resort_identity(user_id: &str, now: i64) -> (Vec<u8>, Vec<u8>) {
+    use openmls::ciphersuite::signature::SignaturePublicKey;
+    use openmls::credentials::{BasicCredential, CredentialWithKey};
+    use openmls::prelude::*;
+    use openmls_rust_crypto::OpenMlsRustCrypto;
+    use openmls_traits::crypto::OpenMlsCrypto;
+    use openmls_traits::OpenMlsProvider;
+    use tls_codec::Serialize as TlsSerialize;
+
+    let provider = OpenMlsRustCrypto::default();
+    let scheme = SignatureScheme::ED25519;
+    let (priv_bytes, pub_bytes) = provider.crypto().signature_key_gen(scheme).unwrap();
+    let public_key = SignaturePublicKey::try_from(pub_bytes.clone()).unwrap();
+    let credential = BasicCredential::new(user_id.as_bytes().to_vec());
+    let credential_with_key = CredentialWithKey {
+        credential: credential.into(),
+        signature_key: public_key,
+    };
+    let signer = MlsSigner {
+        key: zeroize::Zeroizing::new(priv_bytes.clone()),
+        scheme,
+    };
+    let lifetime = make_lifetime(now as u64).unwrap();
+    let kpb = KeyPackage::builder()
+        .key_package_extensions(Extensions::empty())
+        .key_package_lifetime(lifetime)
+        // A KeyPackage carrying the LastResort extension must advertise it in the leaf's
+        // capabilities, or add_member's KeyPackage validation rejects it (UnsupportedExtension).
+        .leaf_node_capabilities(Capabilities::new(
+            None,
+            Some(&[crate::suite_policy::mls_generation_suite()]),
+            Some(&[ExtensionType::LastResort]),
+            None,
+            None,
+        ))
+        .mark_as_last_resort()
+        .build(
+            crate::suite_policy::mls_generation_suite(),
+            &provider,
+            &signer,
+            credential_with_key,
+        )
+        .unwrap();
+    let kp_bytes = kpb.key_package().tls_serialize_detached().unwrap();
+    let storage_map: Vec<(Vec<u8>, Vec<u8>)> = provider
+        .storage()
+        .values
+        .read()
+        .unwrap()
+        .clone()
+        .into_iter()
+        .collect();
+    let bundle = IdentityBundle {
+        key_package_bundle: Some(kpb),
+        private_key: priv_bytes,
+        signature_scheme: scheme,
+        public_key_bytes: pub_bytes,
+        user_id: user_id.to_string(),
+        storage_map,
+    };
+    (kp_bytes, serde_json::to_vec(&bundle).unwrap())
+}
+
+/// The last-resort exception (RFC 9420 §16.8): a last-resort KeyPackage is exempt from single-use,
+/// so `process_welcome` PRESERVES it - the returned bundle keeps `key_package_bundle` as `Some` and
+/// the same bundle opens a second, independent Welcome. This is the counterpart to
+/// `a_consumed_keypackage_cannot_open_a_second_welcome`: preservation is correct by construction
+/// (a last-resort package is not deleted by the join, so the storage diff removes nothing and the
+/// `!last_resort` clear-gate does not fire), and this test pins it.
+#[test]
+fn a_last_resort_keypackage_survives_two_welcomes() {
+    let now = now_secs();
+    let (_ua, _kpa, bundle_a) = generate_identity("alice-lr2".to_string(), now).expect("alice");
+    let (kp_b, bundle_b) = last_resort_identity("bob-lr2", now);
+
+    // Alice adds Bob (last-resort KeyPackage) to two independent groups.
+    let g1 = create_group("lr-g1".to_string(), bundle_a.clone()).expect("create g1");
+    let (_g1, welcome1, _c1) = add_member(g1, bundle_a.clone(), kp_b.clone()).expect("add bob g1");
+    let g2 = create_group("lr-g2".to_string(), bundle_a.clone()).expect("create g2");
+    let (_g2, welcome2, _c2) = add_member(g2, bundle_a.clone(), kp_b).expect("add bob g2");
+
+    // First Welcome joins; the returned bundle must KEEP the last-resort KeyPackage.
+    let (_s1, bundle_b_after) = process_welcome(welcome1, bundle_b).expect("first Welcome joins");
+    let parsed: IdentityBundle = serde_json::from_slice(&bundle_b_after).expect("deserialize");
+    assert!(
+        parsed.key_package_bundle.is_some(),
+        "a last-resort KeyPackage must be preserved in the returned bundle"
+    );
+
+    // The same bundle must open the second, independent Welcome (reusable by design).
+    let second = process_welcome(welcome2, bundle_b_after);
+    assert!(
+        second.is_ok(),
+        "a last-resort KeyPackage must remain usable for a second Welcome"
     );
 }

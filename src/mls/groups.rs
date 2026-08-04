@@ -34,7 +34,7 @@ use openmls_traits::OpenMlsProvider;
 use std::convert::TryFrom;
 use std::mem;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::mls::{make_lifetime, GroupState, IdentityBundle, MlsSigner};
 
@@ -107,7 +107,7 @@ pub fn regenerate_key_package(
     //    + new storage_map, but PRESERVING private_key,
     //    signature_scheme, public_key_bytes, and user_id.
     let new_bundle = IdentityBundle {
-        key_package_bundle: new_key_package_bundle,
+        key_package_bundle: Some(new_key_package_bundle),
         private_key: mem::take(&mut old.private_key),
         signature_scheme: old.signature_scheme,
         public_key_bytes: mem::take(&mut old.public_key_bytes),
@@ -734,18 +734,39 @@ pub fn process_welcome(
         values.clone().into_iter().collect()
     };
 
-    // Retire the consumed KeyPackage from the caller's bundle: keep exactly the entries that
-    // survived the join, dropping the ones OpenMLS deleted (the spent KeyPackage + its private
-    // init/encryption material). A last-resort KeyPackage is not deleted (keys_for_welcome gates
-    // on `!last_resort()`), so it survives here and the bundle stays reusable, by design. The
-    // bundle's other secret fields (signing key etc.) are untouched: only storage_map was moved
-    // out above, so writing the filtered map back preserves the persisted identity.
+    // Retire the consumed KeyPackage from the caller's bundle so it cannot open a second Welcome
+    // (RFC 9420 §16.8 single-use). Two halves, both required:
+    //
+    //  (a) storage_map - keep exactly the entries that survived the join, dropping the ones
+    //      OpenMLS deleted (the spent KeyPackage + its private init/encryption material). Those
+    //      dropped values are secret, so they are zeroized rather than merely dropped.
+    //  (b) key_package_bundle - this field carries a SECOND copy of the same KeyPackage incl. its
+    //      private HPKE material. Retiring (a) alone leaves that copy recoverable at rest and
+    //      reconstructable back into provider storage, so single-use requires clearing it to None.
+    //
+    // A last-resort KeyPackage is reusable by design: OpenMLS does not delete it (keys_for_welcome
+    // gates on `!last_resort()`), so (a) removes nothing and (b) keeps the field as Some.
+    let was_last_resort = identity
+        .key_package_bundle
+        .as_ref()
+        .is_some_and(|kpb| kpb.key_package().last_resort());
+
     let surviving_keys: std::collections::HashSet<Vec<u8>> =
         post_join_storage.iter().map(|(k, _)| k.clone()).collect();
-    identity.storage_map = original_storage
-        .into_iter()
-        .filter(|(k, _)| surviving_keys.contains(k))
-        .collect();
+    // Keep the entries that survived the join; zeroize the retired (secret) values rather than
+    // dropping them unwiped.
+    let mut kept: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(original_storage.len());
+    for (k, mut v) in original_storage {
+        if surviving_keys.contains(&k) {
+            kept.push((k, v));
+        } else {
+            v.zeroize();
+        }
+    }
+    identity.storage_map = kept;
+    if !was_last_resort {
+        identity.key_package_bundle = None;
+    }
     let updated_bundle_bytes = crate::mls::zeroizing_json(&identity)?;
 
     let state = GroupState {

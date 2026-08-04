@@ -41,9 +41,18 @@ impl Drop for GroupState {
 /// `private_key` is the Ed25519 MLS signing key; `storage_map` may carry the same
 /// ratchet-tree secrets as `GroupState` (populated on `process_welcome`). Both are
 /// wiped on drop - the same openmls-internal-copy bound noted on `GroupState` applies.
+///
+/// `key_package_bundle` is `Option` for `KeyPackage` single-use (RFC 9420 §16.8): it carries the
+/// full published `KeyPackage` incl. its private `HPKE` material, and `process_welcome` sets it to
+/// `None` once that `KeyPackage` has opened a Welcome (unless it is a last-resort package, which is
+/// reusable and kept as `Some`). Retiring only `storage_map` would leave the spent private
+/// material recoverable here and reconstructable back into provider storage, so single-use
+/// requires clearing this field too. `#[serde(default)]` keeps old bundles (which always carry a
+/// present `KeyPackage`, read as `Some`) deserializable.
 #[derive(Serialize, Deserialize)]
 pub struct IdentityBundle {
-    pub key_package_bundle: KeyPackageBundle,
+    #[serde(default)]
+    pub key_package_bundle: Option<KeyPackageBundle>,
     pub private_key: Vec<u8>,
     pub signature_scheme: SignatureScheme,
     pub public_key_bytes: Vec<u8>,
