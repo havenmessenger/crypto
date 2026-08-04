@@ -174,7 +174,7 @@ fn group_lifecycle_round_trips_after_zeroize_refactor() {
     let (group_state_a2, combined_welcome, _commit_ab) =
         add_member(group_state_a, bundle_a.clone(), kp_b).expect("add_member");
 
-    let group_state_b =
+    let (group_state_b, _bob_bundle) =
         process_welcome(combined_welcome, bundle_b.clone()).expect("process_welcome");
 
     let plaintext = b"hello from alice".to_vec();
@@ -222,14 +222,14 @@ fn add_member_commit_keeps_existing_member_in_sync_three_party() {
     // Alice adds Bob - 2-member group. Bob joins via his Welcome.
     let (group_state_a, welcome_for_bob, _commit_ab) =
         add_member(group_state_a, bundle_a.clone(), kp_b).expect("add_member (bob)");
-    let group_state_b =
+    let (group_state_b, _bob_bundle) =
         process_welcome(welcome_for_bob, bundle_b.clone()).expect("bob process_welcome");
 
     // Alice adds Carol - 3-member group. This Commit is the one Bob must receive: Bob was not
     // part of this operation and has no other way to learn the group advanced an epoch.
     let (group_state_a, welcome_for_carol, commit_for_bob) =
         add_member(group_state_a, bundle_a.clone(), kp_c).expect("add_member (carol)");
-    let group_state_c =
+    let (group_state_c, _carol_bundle) =
         process_welcome(welcome_for_carol, bundle_c.clone()).expect("carol process_welcome");
 
     // Bob (the existing member, untouched by the add itself) advances his epoch by processing
@@ -284,7 +284,8 @@ fn list_members_reflects_add() {
 
     let (state, welcome_b, _commit) =
         add_member(state, bundle_a.clone(), kp_b).expect("add_member (bob)");
-    let _state_b = process_welcome(welcome_b, bundle_b).expect("bob process_welcome");
+    let (_state_b, _bob_bundle) =
+        process_welcome(welcome_b, bundle_b).expect("bob process_welcome");
 
     let pair = list_members(state.clone()).expect("list_members (pair)");
     assert_eq!(pair.len(), 2, "the added member must appear");
@@ -318,7 +319,8 @@ fn list_members_reflects_removal() {
     let state = create_group("group-list-rm".to_string(), bundle_a.clone()).expect("create_group");
     let (state, welcome_b, _commit) =
         add_member(state, bundle_a.clone(), kp_b).expect("add_member (bob)");
-    let _state_b = process_welcome(welcome_b, bundle_b).expect("bob process_welcome");
+    let (_state_b, _bob_bundle) =
+        process_welcome(welcome_b, bundle_b).expect("bob process_welcome");
 
     let before = list_members(state.clone()).expect("list_members (before)");
     assert!(before.contains(&key_b), "bob is present before removal");
@@ -351,7 +353,7 @@ fn list_members_matches_the_tree() {
     let state = create_group("group-not-influenceable".to_string(), bundle_a.clone())
         .expect("create_group");
     let (state, welcome, _commit) = add_member(state, bundle_a.clone(), kp_b).expect("add_member");
-    let _state_b = process_welcome(welcome, bundle_b).expect("bob process_welcome");
+    let (_state_b, _bob_bundle) = process_welcome(welcome, bundle_b).expect("bob process_welcome");
 
     let mut listed = list_members(state.clone()).expect("list_members");
     let mut expected = vec![key_a, key_b];
@@ -916,5 +918,38 @@ fn add_members_bulk_rejects_over_cap_aggregate_bytes() {
     assert!(
         result.is_err(),
         "a batch over the aggregate-byte cap must be refused"
+    );
+}
+
+/// RFC 9420 §16.8: a KeyPackage is single-use. A KeyPackage consumed by one Welcome must not
+/// open a second one - otherwise a published KeyPackage can seed a second attacker-controlled
+/// group and Welcome for the same member. `process_welcome` returns a bundle with the consumed
+/// KeyPackage retired from its storage, so replaying that KeyPackage into a second Welcome is
+/// rejected.
+///
+/// This assertion is load-bearing: if `process_welcome` returned the joiner's bundle with its
+/// storage unchanged, `second` would be `Ok` and this test would fail.
+#[test]
+fn a_consumed_keypackage_cannot_open_a_second_welcome() {
+    let now = now_secs();
+    let (_ua, _kpa, bundle_a) = generate_identity("alice-ku".to_string(), now).expect("alice");
+    let (_ub, kp_b, bundle_b) = generate_identity("bob-ku".to_string(), now).expect("bob");
+
+    // Alice creates two groups and adds Bob to each with the SAME published KeyPackage kp_b.
+    let g1 = create_group("ku-g1".to_string(), bundle_a.clone()).expect("create g1");
+    let (_g1, welcome1, _c1) = add_member(g1, bundle_a.clone(), kp_b.clone()).expect("add bob g1");
+    let g2 = create_group("ku-g2".to_string(), bundle_a.clone()).expect("create g2");
+    let (_g2, welcome2, _c2) = add_member(g2, bundle_a.clone(), kp_b).expect("add bob g2");
+
+    // Bob processes the first Welcome, joining group 1. The returned bundle has kp_b retired.
+    let (_state1, bundle_b_after) =
+        process_welcome(welcome1, bundle_b).expect("first Welcome joins");
+
+    // The consumed KeyPackage must not open the second Welcome (single-use).
+    let second = process_welcome(welcome2, bundle_b_after);
+    assert!(
+        second.is_err(),
+        "a KeyPackage consumed by one Welcome opened a second one - RFC 9420 §16.8 single-use \
+         violated (finding #8)"
     );
 }

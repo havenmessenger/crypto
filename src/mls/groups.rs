@@ -615,11 +615,19 @@ pub fn list_members(group_state_bytes: Vec<u8>) -> anyhow::Result<Vec<String>> {
 }
 
 /// Process a Welcome message to join a group.
-/// Returns the new group state bytes.
+///
+/// Returns `(new_group_state, updated_bundle)`. The updated bundle is the caller's bundle with
+/// the **consumed KeyPackage retired** from its `storage_map`: a KeyPackage is single-use (RFC
+/// 9420 §16.8), so once it has opened a Welcome it must not open a second one. OpenMLS deletes
+/// the used KeyPackage from the provider during the join (`keys_for_welcome`, for non-last-resort
+/// packages); this function reflects that deletion back into the bundle the caller persists, so a
+/// replayed second Welcome for the same KeyPackage is rejected. A last-resort KeyPackage is not
+/// deleted and therefore survives in the returned bundle, by design. The caller MUST persist the
+/// returned bundle in place of the input bundle.
 pub fn process_welcome(
     welcome_bytes: Vec<u8>, // This is actually combined (welcome_bytes, ratchet_tree_bytes)
     bundle_bytes: Vec<u8>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     // Wrap the owned bundle input on entry (see regenerate_key_package's
     // comment). welcome_bytes is an MLS Welcome (HPKE-sealed wire form), not the plaintext
     // key bundle.
@@ -640,11 +648,14 @@ pub fn process_welcome(
         identity.storage_map.len()
     );
 
-    // Inject the full storage from identity generation
-    // This contains the KeyPackage in OpenMLS's expected format
+    // Snapshot the caller's KeyPackage storage before the join, then inject a copy. OpenMLS
+    // retires the consumed KeyPackage from the provider during new_from_welcome (single-use, RFC
+    // 9420 §16.8); we diff the post-join storage against this snapshot to rebuild a bundle whose
+    // spent KeyPackage material is removed.
+    let original_storage: Vec<(Vec<u8>, Vec<u8>)> = mem::take(&mut identity.storage_map);
     {
         let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut identity.storage_map).into_iter().collect();
+        *values = original_storage.iter().cloned().collect();
 
         #[cfg(test)]
         for (k, _v) in values.iter() {
@@ -716,20 +727,35 @@ pub fn process_welcome(
         .into_group(&provider)
         .map_err(|e| anyhow::anyhow!("Error joining group: {:?}", e))?;
 
-    // Export storage
-    let storage_map = {
+    // Export the post-join storage: the group secrets the caller persists to operate the group.
+    // The consumed KeyPackage is already absent here - OpenMLS deleted it during the join.
+    let post_join_storage: Vec<(Vec<u8>, Vec<u8>)> = {
         let values = provider.storage().values.read().unwrap();
         values.clone().into_iter().collect()
     };
 
+    // Retire the consumed KeyPackage from the caller's bundle: keep exactly the entries that
+    // survived the join, dropping the ones OpenMLS deleted (the spent KeyPackage + its private
+    // init/encryption material). A last-resort KeyPackage is not deleted (keys_for_welcome gates
+    // on `!last_resort()`), so it survives here and the bundle stays reusable, by design. The
+    // bundle's other secret fields (signing key etc.) are untouched: only storage_map was moved
+    // out above, so writing the filtered map back preserves the persisted identity.
+    let surviving_keys: std::collections::HashSet<Vec<u8>> =
+        post_join_storage.iter().map(|(k, _)| k.clone()).collect();
+    identity.storage_map = original_storage
+        .into_iter()
+        .filter(|(k, _)| surviving_keys.contains(k))
+        .collect();
+    let updated_bundle_bytes = crate::mls::zeroizing_json(&identity)?;
+
     let state = GroupState {
         group_id: group.group_id().to_vec(),
-        storage_map,
+        storage_map: post_join_storage,
     };
 
     let state_bytes = crate::mls::zeroizing_json(&state)?;
 
-    Ok(state_bytes.to_vec())
+    Ok((state_bytes.to_vec(), updated_bundle_bytes.to_vec()))
 }
 
 /// Process an incoming Commit: an existing member advances its epoch after another member
