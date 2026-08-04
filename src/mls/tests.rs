@@ -9,9 +9,10 @@
 use super::*;
 use crate::identity::generate_identity;
 use crate::mls::groups::{
-    add_member, add_members_bulk, create_group, decrypt_message, encrypt_message, list_members,
-    mls_extract_signature_key, mls_process_commit, process_welcome, regenerate_key_package,
-    remove_member_by_credential, MAX_BULK_AGGREGATE_BYTES, MAX_BULK_MEMBERS,
+    add_member, add_members_bulk, create_group, decrypt_message, encrypt_message, kp_storage_key,
+    list_members, mls_extract_signature_key, mls_process_commit, process_welcome,
+    regenerate_key_package, remove_member_by_credential, MAX_BULK_AGGREGATE_BYTES,
+    MAX_BULK_MEMBERS,
 };
 use std::mem::ManuallyDrop;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1061,5 +1062,102 @@ fn a_last_resort_keypackage_survives_two_welcomes() {
     assert!(
         second.is_ok(),
         "a last-resort KeyPackage must remain usable for a second Welcome"
+    );
+}
+
+/// The field-clear gate must key off what the join ACTUALLY consumed, not the KeyPackage's
+/// self-reported `last_resort()` flag. Here the `key_package_bundle` field is a last-resort
+/// KeyPackage while the Welcome consumes a NORMAL KeyPackage from `storage_map` - the two diverge,
+/// exactly the case a serde-edited bundle produces. The field is not backed by any KeyPackage that
+/// survived the join, so it must be cleared, fail closed. The old gate, trusting `field.last_resort()`,
+/// preserved it - which is what this assertion reddens.
+#[test]
+fn field_last_resort_flag_not_backed_by_storage_is_cleared() {
+    let now = now_secs();
+    let (_ua, _kpa, bundle_a) = generate_identity("div-alice".to_string(), now).expect("alice");
+    let (_ub, kp_n, bundle_n) = generate_identity("div-bob".to_string(), now).expect("bob");
+    let (_kp_l, lr_bundle) = last_resort_identity("div-bob-lr", now);
+
+    // Field := a last-resort KeyPackage; storage_map stays the NORMAL KeyPackage the Welcome uses.
+    let mut tampered: IdentityBundle = serde_json::from_slice(&bundle_n).expect("bob bundle");
+    let mut lr: IdentityBundle = serde_json::from_slice(&lr_bundle).expect("lr bundle");
+    tampered.key_package_bundle = lr.key_package_bundle.take();
+    let tampered_bytes = serde_json::to_vec(&tampered).expect("reserialize");
+
+    // Alice consumes the normal KeyPackage kp_n.
+    let g1 = create_group("div-g1".to_string(), bundle_a.clone()).expect("g1");
+    let (_g1, welcome1, _c1) = add_member(g1, bundle_a, kp_n).expect("add bob");
+
+    let (_state, after) = process_welcome(welcome1, tampered_bytes).expect("join via normal KP");
+    let parsed: IdentityBundle = serde_json::from_slice(&after).expect("deserialize");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "a field last_resort flag not backed by a surviving storage KeyPackage must be cleared \
+         (fail closed); the old flag-trusting gate kept it"
+    );
+}
+
+/// With multiple KeyPackages in `storage_map`, only the one the Welcome consumed is retired: a
+/// last-resort KeyPackage present alongside the consumed normal one survives and still opens its
+/// own Welcome, while the consumed one cannot open a second.
+#[test]
+fn multiple_keypackages_only_consumed_one_retired() {
+    let now = now_secs();
+    let (_ua, _kpa, bundle_a) = generate_identity("multi-alice".to_string(), now).expect("alice");
+    let (_ub, kp_n, bundle_n) = generate_identity("multi-bob".to_string(), now).expect("bob");
+    let (kp_l, lr_bundle) = last_resort_identity("multi-bob-lr", now);
+
+    // One bundle holding TWO KeyPackages: the normal kp_n (field + storage) and a last-resort
+    // kp_l (storage only).
+    let mut multi: IdentityBundle = serde_json::from_slice(&bundle_n).expect("bob bundle");
+    let lr: IdentityBundle = serde_json::from_slice(&lr_bundle).expect("lr bundle");
+    multi.storage_map.extend(lr.storage_map.iter().cloned());
+    let multi_bytes = serde_json::to_vec(&multi).expect("reserialize");
+
+    // g1: consume kp_n. g2: a Welcome to kp_l. g3: a replay Welcome to the same kp_n.
+    let g1 = create_group("multi-g1".to_string(), bundle_a.clone()).expect("g1");
+    let (_g1, welcome_n, _c1) = add_member(g1, bundle_a.clone(), kp_n.clone()).expect("add n1");
+    let g2 = create_group("multi-g2".to_string(), bundle_a.clone()).expect("g2");
+    let (_g2, welcome_l, _c2) = add_member(g2, bundle_a.clone(), kp_l).expect("add l");
+    let g3 = create_group("multi-g3".to_string(), bundle_a.clone()).expect("g3");
+    let (_g3, welcome_n_replay, _c3) = add_member(g3, bundle_a, kp_n).expect("add n2");
+
+    let (_s1, after) = process_welcome(welcome_n, multi_bytes).expect("join via normal KP");
+    let parsed: IdentityBundle = serde_json::from_slice(&after).expect("deserialize");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "the consumed normal KeyPackage's field copy must be cleared"
+    );
+
+    // Only the consumed KeyPackage was retired: replaying it is rejected.
+    assert!(
+        process_welcome(welcome_n_replay, after.clone()).is_err(),
+        "the consumed normal KeyPackage must not open a second Welcome"
+    );
+    // The last-resort KeyPackage survived alongside it and still opens its own Welcome.
+    assert!(
+        process_welcome(welcome_l, after).is_ok(),
+        "a last-resort KeyPackage present alongside the consumed one must survive"
+    );
+}
+
+/// `kp_storage_key` must reproduce the exact key OpenMLS's MemoryStorage files a KeyPackage under,
+/// or the survivorship-based field-clear gate silently stops matching. Pins the coupling: a
+/// KeyPackage built through the normal identity path is present in its bundle's `storage_map` under
+/// the key this helper computes.
+#[test]
+fn field_clear_gate_matches_openmls_storage_key() {
+    let now = now_secs();
+    let (_u, _kp, bundle) = generate_identity("keyfmt".to_string(), now).expect("identity");
+    let parsed: IdentityBundle = serde_json::from_slice(&bundle).expect("deserialize");
+    let kpb = parsed
+        .key_package_bundle
+        .as_ref()
+        .expect("a fresh identity carries its KeyPackage in the field");
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let computed = kp_storage_key(kpb.key_package(), &provider).expect("compute key");
+    assert!(
+        parsed.storage_map.iter().any(|(k, _)| k == &computed),
+        "kp_storage_key must equal the key OpenMLS stored the KeyPackage under"
     );
 }

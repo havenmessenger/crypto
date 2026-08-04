@@ -614,6 +614,23 @@ pub fn list_members(group_state_bytes: Vec<u8>) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+/// The OpenMLS `MemoryStorage` key under which a KeyPackage is stored: the `KeyPackage` label, the
+/// serialized authenticated hash reference, and the storage version. Lets `process_welcome` decide,
+/// from the post-join storage diff, whether a bundle's KeyPackage was consumed by the join - the
+/// authenticated signal, in place of the KeyPackage's self-reported `last_resort()` flag, which a
+/// serde-edited bundle can forge. The layout matches `openmls_memory_storage`'s `build_key`; a
+/// change there is caught by `field_clear_gate_matches_openmls_storage_key`.
+pub(crate) fn kp_storage_key(
+    kp: &KeyPackage,
+    provider: &impl OpenMlsProvider,
+) -> anyhow::Result<Vec<u8>> {
+    let hash_ref = kp.hash_ref(provider.crypto())?;
+    let mut key = b"KeyPackage".to_vec();
+    key.extend_from_slice(&serde_json::to_vec(&hash_ref)?);
+    key.extend_from_slice(&openmls_traits::storage::CURRENT_VERSION.to_be_bytes());
+    Ok(key)
+}
+
 /// Process a Welcome message to join a group.
 ///
 /// Returns `(new_group_state, updated_bundle)`. The updated bundle is the caller's bundle with
@@ -735,7 +752,8 @@ pub fn process_welcome(
     };
 
     // Retire the consumed KeyPackage from the caller's bundle so it cannot open a second Welcome
-    // (RFC 9420 §16.8 single-use). Two halves, both required:
+    // (RFC 9420 §16.8 single-use). Both halves derive from ONE authenticated fact - which storage
+    // keys survived the join:
     //
     //  (a) storage_map - keep exactly the entries that survived the join, dropping the ones
     //      OpenMLS deleted (the spent KeyPackage + its private init/encryption material). Those
@@ -743,17 +761,25 @@ pub fn process_welcome(
     //  (b) key_package_bundle - this field carries a SECOND copy of the same KeyPackage incl. its
     //      private HPKE material. Retiring (a) alone leaves that copy recoverable at rest and
     //      reconstructable back into provider storage, so single-use requires clearing it to None.
+    //      The clear decision is bound to whether the field's OWN KeyPackage survived, NOT to its
+    //      self-reported last_resort() flag: the field and the storage KeyPackage OpenMLS consumed
+    //      can diverge (multiple KeyPackages, or a serde-edited bundle), so trusting the flag could
+    //      preserve a spent KeyPackage or drop a live one.
     //
     // A last-resort KeyPackage is reusable by design: OpenMLS does not delete it (keys_for_welcome
-    // gates on `!last_resort()`), so (a) removes nothing and (b) keeps the field as Some.
-    let was_last_resort = identity
-        .key_package_bundle
-        .as_ref()
-        .is_some_and(|kpb| kpb.key_package().last_resort());
-
+    // gates on `!last_resort()`), so its storage key survives - (a) removes nothing and (b) keeps
+    // the field as Some. A consumed, forged, or unbacked field KeyPackage is absent from the
+    // survivors and is cleared, fail closed.
     let surviving_keys: std::collections::HashSet<Vec<u8>> =
         post_join_storage.iter().map(|(k, _)| k.clone()).collect();
-    // Keep the entries that survived the join; zeroize the retired (secret) values rather than
+
+    let field_kp_survives = identity
+        .key_package_bundle
+        .as_ref()
+        .and_then(|kpb| kp_storage_key(kpb.key_package(), &provider).ok())
+        .is_some_and(|storage_key| surviving_keys.contains(&storage_key));
+
+    // (a): keep the entries that survived the join; zeroize the retired (secret) values rather than
     // dropping them unwiped.
     let mut kept: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(original_storage.len());
     for (k, mut v) in original_storage {
@@ -764,7 +790,8 @@ pub fn process_welcome(
         }
     }
     identity.storage_map = kept;
-    if !was_last_resort {
+    // (b): clear the second copy unless the field's own KeyPackage survived the join (last-resort).
+    if !field_kp_survives {
         identity.key_package_bundle = None;
     }
     let updated_bundle_bytes = crate::mls::zeroizing_json(&identity)?;
