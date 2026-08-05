@@ -36,13 +36,16 @@ fn member_add_remove_commit_epoch_sync() {
         mimi_add_member_commit(alice_s, alice.clone(), carol_kp).expect("add carol");
     let carol_s = mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
         .expect("carol joins");
-    let bob_s = mls_process_commit(bob_s, bob.clone(), add_commit).expect("bob processes add");
+    let (bob_s, _sender) =
+        mls_process_commit(bob_s, bob.clone(), add_commit).expect("bob processes add");
 
     // Proof of epoch sync after ADD: alice encrypts at the new epoch; bob and carol both decrypt.
     let msg = b"after-add message".to_vec();
     let (alice_s, ct) = encrypt_message(alice_s, alice.clone(), msg.clone()).expect("encrypt");
-    let (bob_s, pt_bob) = decrypt_message(bob_s, bob.clone(), ct.clone()).expect("bob decrypt");
-    let (_carol_s, pt_carol) = decrypt_message(carol_s, carol.clone(), ct).expect("carol decrypt");
+    let (bob_s, pt_bob, _sender) =
+        decrypt_message(bob_s, bob.clone(), ct.clone()).expect("bob decrypt");
+    let (_carol_s, pt_carol, _sender) =
+        decrypt_message(carol_s, carol.clone(), ct).expect("carol decrypt");
     assert_eq!(pt_bob, msg, "bob must decrypt at the post-add epoch");
     assert_eq!(
         pt_carol, msg,
@@ -53,11 +56,12 @@ fn member_add_remove_commit_epoch_sync() {
     let (alice_s, rm_commit) =
         mimi_remove_member_commit(alice_s, alice.clone(), "carol@mls.test".to_string())
             .expect("remove carol");
-    let bob_s = mls_process_commit(bob_s, bob.clone(), rm_commit).expect("bob processes remove");
+    let (bob_s, _sender) =
+        mls_process_commit(bob_s, bob.clone(), rm_commit).expect("bob processes remove");
 
     let msg2 = b"after-remove message".to_vec();
     let (_alice_s, ct2) = encrypt_message(alice_s, alice.clone(), msg2.clone()).expect("encrypt2");
-    let (_bob_s, pt_bob2) = decrypt_message(bob_s, bob, ct2).expect("bob decrypt2");
+    let (_bob_s, pt_bob2, _sender) = decrypt_message(bob_s, bob, ct2).expect("bob decrypt2");
     assert_eq!(pt_bob2, msg2, "bob must decrypt at the post-remove epoch");
 }
 
@@ -86,7 +90,7 @@ fn member_add_remove_appsync_roster_round_trip() {
             .expect("add carol with roster");
     let carol_s = mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
         .expect("carol joins");
-    let (bob_s, surfaced_add) =
+    let (bob_s, surfaced_add, _sender) =
         mls_process_commit_appsync(bob_s, bob.clone(), add_commit).expect("bob processes add");
     assert_eq!(
         surfaced_add, roster_add,
@@ -96,8 +100,10 @@ fn member_add_remove_appsync_roster_round_trip() {
     // Epoch sync after add (the roster rode WITH the Add): alice -> bob+carol decrypt.
     let msg = b"after-appsync-add".to_vec();
     let (alice_s, ct) = encrypt_message(alice_s, alice.clone(), msg.clone()).expect("encrypt");
-    let (bob_s, pt_bob) = decrypt_message(bob_s, bob.clone(), ct.clone()).expect("bob decrypt");
-    let (_carol_s, pt_carol) = decrypt_message(carol_s, carol.clone(), ct).expect("carol decrypt");
+    let (bob_s, pt_bob, _sender) =
+        decrypt_message(bob_s, bob.clone(), ct.clone()).expect("bob decrypt");
+    let (_carol_s, pt_carol, _sender) =
+        decrypt_message(carol_s, carol.clone(), ct).expect("carol decrypt");
     assert_eq!(pt_bob, msg);
     assert_eq!(pt_carol, msg);
 
@@ -109,7 +115,7 @@ fn member_add_remove_appsync_roster_round_trip() {
         roster_rem.clone(),
     )
     .expect("remove carol with roster");
-    let (bob_s, surfaced_rem) =
+    let (bob_s, surfaced_rem, _sender) =
         mls_process_commit_appsync(bob_s, bob.clone(), rm_commit).expect("bob processes remove");
     assert_eq!(
         surfaced_rem, roster_rem,
@@ -118,7 +124,7 @@ fn member_add_remove_appsync_roster_round_trip() {
 
     let msg2 = b"after-appsync-remove".to_vec();
     let (_alice_s, ct2) = encrypt_message(alice_s, alice, msg2.clone()).expect("encrypt2");
-    let (_bob_s, pt_bob2) = decrypt_message(bob_s, bob, ct2).expect("bob decrypt2");
+    let (_bob_s, pt_bob2, _sender) = decrypt_message(bob_s, bob, ct2).expect("bob decrypt2");
     assert_eq!(
         pt_bob2, msg2,
         "bob stays epoch-synced after the appsync remove"
@@ -155,7 +161,7 @@ fn mimi_self_contained_welcome_round_trip() {
     let m1 = b"hello over MIMI (self-contained welcome)".to_vec();
     let (_snd_state_3, ct1) =
         encrypt_message(snd_state_2, snd_bundle, m1.clone()).expect("sender encrypts");
-    let (rcv_state_2, p1) =
+    let (rcv_state_2, p1, _sender) =
         decrypt_message(rcv_state, rcv_bundle.clone(), ct1).expect("receiver decrypts");
     assert_eq!(p1, m1, "receiver must decrypt the sender's message");
 
@@ -720,5 +726,60 @@ fn mimi_add_member_rejects_oversize_key_package() {
     assert!(
         result.is_err(),
         "mimi_add_member must reject an oversize KeyPackage buffer"
+    );
+}
+
+/// The MIMI-lane commit processor surfaces the COMMITTER's verified key alongside the roster
+/// payload - the sender an Add's authorization is decided against on the cross-provider lane, and
+/// the payload it must keep surfacing. Ground truth for each member's real key comes from
+/// `mls_extract_signature_key` over that member's own KeyPackage, an independent route.
+///
+/// Mutation sensor: returning the added member or the processor instead of the committer reddens
+/// the committer assertion; dropping the roster surfacing reddens the payload assertion.
+#[test]
+fn appsync_commit_surfaces_the_committer_and_still_surfaces_the_roster() {
+    use crate::mls::groups::mls_extract_signature_key;
+    let now = now_secs();
+    let (_a, alice_kp, alice) =
+        mimi_generate_identity("alice@as-snd.test".to_string(), now).expect("alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@as-snd.test".to_string(), now).expect("bob");
+    let (_c, carol_kp, _carol) =
+        mimi_generate_identity("carol@as-snd.test".to_string(), now).expect("carol");
+
+    let alice_real = mls_extract_signature_key(alice_kp);
+    let bob_real = mls_extract_signature_key(bob_kp.clone());
+    let carol_real = mls_extract_signature_key(carol_kp.clone());
+
+    let alice_s = mimi_create_group("as-snd-group".to_string(), alice.clone()).expect("create");
+    let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
+    let bob_s = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
+        .expect("bob joins");
+
+    let roster = vec![0x81, 0x83, 0x02];
+    let (_alice_s, _welcome_carol, add_commit) =
+        mimi_add_member_commit_appsync(alice_s, alice.clone(), carol_kp, roster.clone())
+            .expect("add carol with roster");
+    let (_bob_s, surfaced, sender) =
+        mls_process_commit_appsync(bob_s, bob.clone(), add_commit).expect("bob processes add");
+
+    assert_eq!(
+        surfaced, roster,
+        "the roster payload must still be surfaced"
+    );
+    assert_eq!(
+        hex::encode_upper(&sender.signature_key),
+        alice_real,
+        "the surfaced sender must be alice, the committer"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        carol_real,
+        "the surfaced sender must not be the member being added"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        bob_real,
+        "the surfaced sender must not be the member processing the commit"
     );
 }

@@ -156,5 +156,54 @@ pub fn make_lifetime(now_secs: u64) -> anyhow::Result<Lifetime> {
     .map_err(|e| anyhow::anyhow!("Failed to construct Lifetime: {e}"))
 }
 
+/// The cryptographically-authenticated sender of a processed MLS message or commit.
+///
+/// Every field is derived from what openmls VERIFIED while processing the message, never from the
+/// decrypted body or an unverified framing claim. `signature_key` is the signing public key of the
+/// sender's ratchet-tree leaf - the leaf openmls checked the message signature against - held as raw
+/// bytes so a consumer derives whatever identity anchor it needs. `leaf_index` is the sender's
+/// position in the tree; `group_id` and `epoch` name the group and the epoch the message was
+/// processed at (for a commit, the epoch the committer belonged to before the commit applies).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedSender {
+    pub signature_key: Vec<u8>,
+    pub leaf_index: u32,
+    pub group_id: Vec<u8>,
+    pub epoch: u64,
+}
+
+/// Surface the authenticated sender of a processed MLS message or commit: read the sender leaf
+/// openmls authenticated, look its signing key up in the ratchet tree, and return that verified
+/// key. The result is a fact openmls proved by verifying the signature at that leaf, not a claim
+/// the message carries. A sender that is not an in-group member (an external sender or an external
+/// commit) is refused, which keeps a non-member off any path that would surface it as authenticated
+/// and holds the no-external-commit boundary here as well.
+///
+/// For a commit this MUST run on the pre-merge group: the committer is a current member before the
+/// commit applies, and reading the tree after a membership-changing merge would resolve a different
+/// leaf.
+pub(crate) fn authenticated_sender(
+    group: &MlsGroup,
+    processed: &ProcessedMessage,
+) -> anyhow::Result<AuthenticatedSender> {
+    let leaf_index = match processed.sender() {
+        Sender::Member(index) => *index,
+        other => {
+            return Err(anyhow::anyhow!(
+                "MLS sender is not an in-group member: {other:?}"
+            ))
+        }
+    };
+    let member = group.member_at(leaf_index).ok_or_else(|| {
+        anyhow::anyhow!("Authenticated sender leaf {leaf_index:?} is not in the tree")
+    })?;
+    Ok(AuthenticatedSender {
+        signature_key: member.signature_key,
+        leaf_index: leaf_index.u32(),
+        group_id: processed.group_id().as_slice().to_vec(),
+        epoch: processed.epoch().as_u64(),
+    })
+}
+
 #[cfg(test)]
 mod tests;

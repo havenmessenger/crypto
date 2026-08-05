@@ -244,7 +244,7 @@ pub fn decrypt_message(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     ciphertext_bytes: Vec<u8>,
-) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+) -> anyhow::Result<(Vec<u8>, Vec<u8>, crate::mls::AuthenticatedSender)> {
     // Wrap on entry (see regenerate_key_package's comment). bundle_bytes carries no
     // information this function's body reads - a caller may still pass the real bundle bytes,
     // so it's wrapped and held (never read) purely for its wipe-on-drop side effect.
@@ -275,6 +275,11 @@ pub fn decrypt_message(
         .process_message(&provider, message)
         .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
 
+    // Surface the sender openmls just authenticated, before into_content() consumes the
+    // processed message. An application message does not change membership, so the sender's
+    // leaf is present in the loaded group either side of this call.
+    let sender = crate::mls::authenticated_sender(&group, &processed_message)?;
+
     let content = match processed_message.into_content() {
         ProcessedMessageContent::ApplicationMessage(app_msg) => app_msg.into_bytes(),
         _ => return Err(anyhow::anyhow!("Not an application message")),
@@ -292,7 +297,7 @@ pub fn decrypt_message(
     };
     let new_group_state = crate::mls::zeroizing_json(&new_state)?;
 
-    Ok((new_group_state.to_vec(), content))
+    Ok((new_group_state.to_vec(), content, sender))
 }
 
 /// Add a member to the MLS group using their KeyPackage.
@@ -857,7 +862,7 @@ pub fn mls_process_commit(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     commit_bytes: Vec<u8>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, crate::mls::AuthenticatedSender)> {
     // Wrap on entry (see decrypt_message's comment on the unused-but-still-owned
     // bundle_bytes pattern).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
@@ -881,6 +886,10 @@ pub fn mls_process_commit(
     let processed = group
         .process_message(&provider, message)
         .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+    // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
+    // consumes the processed message and before the commit changes membership - the committer is a
+    // current member now and its leaf may move or be removed once the commit applies.
+    let sender = crate::mls::authenticated_sender(&group, &processed)?;
     match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged) => {
             group
@@ -902,7 +911,7 @@ pub fn mls_process_commit(
         group_id: mem::take(&mut state.group_id),
         storage_map: new_storage_map,
     };
-    Ok(crate::mls::zeroizing_json(&new_state)?.to_vec())
+    Ok((crate::mls::zeroizing_json(&new_state)?.to_vec(), sender))
 }
 
 /// Extract a peer's MLS signature public key from their KeyPackage bytes, as

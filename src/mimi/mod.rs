@@ -684,7 +684,7 @@ pub fn mls_process_commit_appsync(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     commit_bytes: Vec<u8>,
-) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+) -> anyhow::Result<(Vec<u8>, Vec<u8>, crate::mls::AuthenticatedSender)> {
     // Wrap on entry (see crate::mls::groups::mls_process_commit's comment on the
     // unused-but-still-owned bundle_bytes pattern).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
@@ -708,6 +708,10 @@ pub fn mls_process_commit_appsync(
     let processed = group
         .process_message(&provider, message)
         .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+    // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
+    // consumes the processed message. On the MIMI lane this is the sender an Add's authorization is
+    // decided against, so it is the verified leaf key rather than any identity the payload claims.
+    let sender = crate::mls::authenticated_sender(&group, &processed)?;
     let mut roster_payload: Vec<u8> = Vec::new();
     match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged) => {
@@ -742,6 +746,7 @@ pub fn mls_process_commit_appsync(
     Ok((
         crate::mls::zeroizing_json(&new_state)?.to_vec(),
         roster_payload,
+        sender,
     ))
 }
 

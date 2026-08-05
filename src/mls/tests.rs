@@ -183,7 +183,7 @@ fn group_lifecycle_round_trips_after_zeroize_refactor() {
         encrypt_message(group_state_a2, bundle_a.clone(), plaintext.clone())
             .expect("encrypt_message");
 
-    let (_group_state_b2, decrypted) =
+    let (_group_state_b2, decrypted, _sender) =
         decrypt_message(group_state_b, bundle_b.clone(), ciphertext).expect("decrypt_message");
     assert_eq!(decrypted, plaintext, "round-tripped plaintext mismatch");
 
@@ -235,14 +235,15 @@ fn add_member_commit_keeps_existing_member_in_sync_three_party() {
 
     // Bob (the existing member, untouched by the add itself) advances his epoch by processing
     // the Commit - this is the fix's whole point: without it, Bob has no path to this state.
-    let group_state_b = mls_process_commit(group_state_b, bundle_b.clone(), commit_for_bob)
-        .expect("bob mls_process_commit");
+    let (group_state_b, _sender) =
+        mls_process_commit(group_state_b, bundle_b.clone(), commit_for_bob)
+            .expect("bob mls_process_commit");
 
     // Prove Bob is in the SAME epoch as Alice post-Carol-add: Alice encrypts, Bob decrypts.
     let plaintext = b"hello group, carol just joined".to_vec();
     let (_group_state_a2, ciphertext) =
         encrypt_message(group_state_a, bundle_a, plaintext.clone()).expect("alice encrypt");
-    let (_group_state_b2, decrypted) =
+    let (_group_state_b2, decrypted, _sender) =
         decrypt_message(group_state_b, bundle_b, ciphertext).expect("bob decrypt");
     assert_eq!(
         decrypted, plaintext,
@@ -1227,4 +1228,197 @@ fn two_secret_bulk_alias_spent_keypackage_cannot_replay() {
         process_welcome(welcome2, after).is_err(),
         "the second [A, B] Welcome replayed the spent KeyPackage B through a surviving alias"
     );
+}
+
+/// `decrypt_message` surfaces the VERIFIED signer's leaf key - the key openmls checked the message
+/// signature against - not the receiver's, and not anything the body carries. Ground truth for a
+/// member's real signing key comes from `mls_extract_signature_key` over that member's own
+/// KeyPackage, which reaches the leaf key by a different route than the group-load path decrypt
+/// uses, so this asserts against an independent value rather than the function agreeing with itself.
+///
+/// Mutation sensor: making the helper return the loaded group's own leaf (the receiver) instead of
+/// the sender's leaf reddens the first assertion; returning a fixed leaf reddens it whenever the
+/// signer is not that leaf.
+#[test]
+fn decrypt_surfaces_the_verified_signer_not_the_receiver() {
+    let now = now_secs();
+    let (_ua, alice_kp, bundle_a) = generate_identity("alice-snd".to_string(), now).expect("alice");
+    let (_ub, bob_kp, bundle_b) = generate_identity("bob-snd".to_string(), now).expect("bob");
+
+    let alice_real = mls_extract_signature_key(alice_kp);
+    let bob_real = mls_extract_signature_key(bob_kp.clone());
+    assert_ne!(
+        alice_real, bob_real,
+        "distinct identities hold distinct signing keys"
+    );
+
+    let group_state_a = create_group("snd-group".to_string(), bundle_a.clone()).expect("create");
+    let (group_state_a, welcome_b, _commit) =
+        add_member(group_state_a, bundle_a.clone(), bob_kp).expect("add bob");
+    let (group_state_b, _bob_bundle) =
+        process_welcome(welcome_b, bundle_b.clone()).expect("bob joins");
+
+    // Alice (leaf 0, the creator) signs; Bob decrypts.
+    let (_a2, ct) = encrypt_message(group_state_a, bundle_a, b"hi bob".to_vec()).expect("encrypt");
+    let (_b2, _pt, sender) = decrypt_message(group_state_b, bundle_b, ct).expect("decrypt");
+
+    assert_eq!(
+        hex::encode_upper(&sender.signature_key),
+        alice_real,
+        "the surfaced sender must be alice, the verified signer"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        bob_real,
+        "the surfaced sender must not be the receiver"
+    );
+    assert_eq!(
+        sender.group_id, b"snd-group",
+        "the group id must be surfaced"
+    );
+    assert_eq!(sender.leaf_index, 0, "alice is the group creator, leaf 0");
+}
+
+/// `mls_process_commit` surfaces the COMMITTER's verified key - the member who authored the Add -
+/// not the member being added and not the member processing the commit. This is the binding a
+/// membership-authorization check needs: cryptographic proof of who signed the change, decided at
+/// the epoch the change was made.
+///
+/// Mutation sensor: returning the added member or the processor instead of the committer reddens
+/// the committer assertion; the two `assert_ne!`s pin that it is neither of the other two members.
+#[test]
+fn native_commit_surfaces_the_committer_not_the_added_or_processor() {
+    let now = now_secs();
+    let (_ua, alice_kp, bundle_a) = generate_identity("alice-cmt".to_string(), now).expect("alice");
+    let (_ub, bob_kp, bundle_b) = generate_identity("bob-cmt".to_string(), now).expect("bob");
+    let (_uc, carol_kp, _bundle_c) =
+        generate_identity("carol-cmt".to_string(), now).expect("carol");
+
+    let alice_real = mls_extract_signature_key(alice_kp);
+    let bob_real = mls_extract_signature_key(bob_kp.clone());
+    let carol_real = mls_extract_signature_key(carol_kp.clone());
+
+    let group_state_a = create_group("cmt-group".to_string(), bundle_a.clone()).expect("create");
+    let (group_state_a, welcome_b, _c) =
+        add_member(group_state_a, bundle_a.clone(), bob_kp).expect("add bob");
+    let (group_state_b, _bb) = process_welcome(welcome_b, bundle_b.clone()).expect("bob joins");
+
+    // Alice (leaf 0) commits Carol's Add; Bob (an existing member) processes that commit.
+    let (_a2, _welcome_c, commit_for_bob) =
+        add_member(group_state_a, bundle_a, carol_kp).expect("add carol");
+    let (_b2, sender) =
+        mls_process_commit(group_state_b, bundle_b, commit_for_bob).expect("bob processes commit");
+
+    assert_eq!(
+        hex::encode_upper(&sender.signature_key),
+        alice_real,
+        "the surfaced sender must be alice, the committer"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        carol_real,
+        "the surfaced sender must not be the member being added"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        bob_real,
+        "the surfaced sender must not be the member processing the commit"
+    );
+    assert_eq!(sender.leaf_index, 0, "alice the committer is leaf 0");
+    assert_eq!(
+        sender.epoch, 1,
+        "the commit was authored at the epoch after bob's add"
+    );
+}
+
+/// The surfaced sender is the cryptographically-verified signer, independent of what the message
+/// body carries. Alice signs a message whose PLAINTEXT is bob's key bytes - a body impersonating
+/// bob - and the surfaced sender is still alice. A reader of the body could be fooled; the sender
+/// binding cannot, because it derives from the leaf openmls verified rather than from the content.
+///
+/// Mutation sensor: deriving the returned key from the decrypted plaintext (or any body-carried
+/// claim) instead of the tree leaf reddens the signer assertion AND collapses the last `assert_ne!`.
+#[test]
+fn decrypt_sender_is_the_verified_signer_not_the_body_claim() {
+    let now = now_secs();
+    let (_ua, alice_kp, bundle_a) = generate_identity("alice-clm".to_string(), now).expect("alice");
+    let (_ub, bob_kp, bundle_b) = generate_identity("bob-clm".to_string(), now).expect("bob");
+
+    let alice_real = mls_extract_signature_key(alice_kp);
+    let bob_real = mls_extract_signature_key(bob_kp.clone());
+
+    let group_state_a = create_group("clm-group".to_string(), bundle_a.clone()).expect("create");
+    let (group_state_a, welcome_b, _commit) =
+        add_member(group_state_a, bundle_a.clone(), bob_kp).expect("add bob");
+    let (group_state_b, _bob_bundle) =
+        process_welcome(welcome_b, bundle_b.clone()).expect("bob joins");
+
+    // Alice signs a body that claims to be bob (it carries bob's raw signing key bytes).
+    let claim = hex::decode(&bob_real).expect("bob's key is valid hex");
+    let (_a2, ct) = encrypt_message(group_state_a, bundle_a, claim.clone()).expect("encrypt");
+    let (_b2, pt, sender) = decrypt_message(group_state_b, bundle_b, ct).expect("decrypt");
+
+    assert_eq!(
+        pt, claim,
+        "the body carries bob's key bytes as its impersonation claim"
+    );
+    assert_eq!(
+        hex::encode_upper(&sender.signature_key),
+        alice_real,
+        "the sender is the verified signer, alice, not the identity the body claims"
+    );
+    assert_ne!(
+        sender.signature_key, pt,
+        "the surfaced sender is not whatever the message body asserts"
+    );
+}
+
+/// With three members, decrypt resolves the ACTUAL signer's leaf, not a fixed leaf and not self.
+/// Carol - a later leaf than the creator - signs; alice decrypts; the surfaced sender is carol.
+///
+/// Mutation sensor: a hardcoded `LeafNodeIndex::new(0)` (the creator) reddens both the carol
+/// assertion and the `leaf_index` assertion, because carol is neither leaf 0 nor the receiver.
+#[test]
+fn decrypt_resolves_the_actual_sender_leaf_in_a_multi_member_group() {
+    let now = now_secs();
+    let (_ua, alice_kp, bundle_a) = generate_identity("alice-mm".to_string(), now).expect("alice");
+    let (_ub, bob_kp, bundle_b) = generate_identity("bob-mm".to_string(), now).expect("bob");
+    let (_uc, carol_kp, bundle_c) = generate_identity("carol-mm".to_string(), now).expect("carol");
+
+    let alice_real = mls_extract_signature_key(alice_kp);
+    let bob_real = mls_extract_signature_key(bob_kp.clone());
+    let carol_real = mls_extract_signature_key(carol_kp.clone());
+
+    let group_state_a = create_group("mm-group".to_string(), bundle_a.clone()).expect("create");
+    let (group_state_a, welcome_b, _cb) =
+        add_member(group_state_a, bundle_a.clone(), bob_kp).expect("add bob");
+    let (_group_state_b, _bb) = process_welcome(welcome_b, bundle_b).expect("bob joins");
+    let (group_state_a, welcome_c, commit_for_bob) =
+        add_member(group_state_a, bundle_a.clone(), carol_kp).expect("add carol");
+    let (group_state_c, _cc) = process_welcome(welcome_c, bundle_c.clone()).expect("carol joins");
+    // Alice (leaf 0), bob (leaf 1) and carol (leaf 2) are now the tree; bob would need the commit
+    // to stay synced, but this test only needs carol -> alice, so bob is not advanced here.
+    let _ = commit_for_bob;
+
+    // Carol (leaf 2) signs; alice decrypts.
+    let (_c2, ct) =
+        encrypt_message(group_state_c, bundle_c, b"hi from carol".to_vec()).expect("carol encrypt");
+    let (_a2, _pt, sender) = decrypt_message(group_state_a, bundle_a, ct).expect("alice decrypt");
+
+    assert_eq!(
+        hex::encode_upper(&sender.signature_key),
+        carol_real,
+        "the surfaced sender must be carol, the actual signer"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        alice_real,
+        "the surfaced sender must not be a fixed leaf 0"
+    );
+    assert_ne!(
+        hex::encode_upper(&sender.signature_key),
+        bob_real,
+        "the surfaced sender must not be an unrelated member"
+    );
+    assert_eq!(sender.leaf_index, 2, "carol is the third leaf");
 }
