@@ -29,13 +29,14 @@ fn member_add_remove_commit_epoch_sync() {
 
     let alice_s = mimi_create_group("mls_group".to_string(), alice.clone()).expect("create_group");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let bob_s = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
+    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
         .expect("bob joins");
 
     let (alice_s, welcome_carol, add_commit) =
         mimi_add_member_commit(alice_s, alice.clone(), carol_kp).expect("add carol");
-    let carol_s = mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
-        .expect("carol joins");
+    let (carol_s, _) =
+        mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
+            .expect("carol joins");
     let (bob_s, _sender) =
         mls_process_commit(bob_s, bob.clone(), add_commit).expect("bob processes add");
 
@@ -81,15 +82,16 @@ fn member_add_remove_appsync_roster_round_trip() {
 
     let alice_s = mimi_create_group("as_group".to_string(), alice.clone()).expect("create_group");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let bob_s = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
+    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
         .expect("bob joins");
 
     let roster_add = vec![0x81, 0x81, 0x00]; // opaque payload; surfacing correctness is what matters
     let (alice_s, welcome_carol, add_commit) =
         mimi_add_member_commit_appsync(alice_s, alice.clone(), carol_kp, roster_add.clone())
             .expect("add carol with roster");
-    let carol_s = mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
-        .expect("carol joins");
+    let (carol_s, _) =
+        mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
+            .expect("carol joins");
     let (bob_s, surfaced_add, _sender) =
         mls_process_commit_appsync(bob_s, bob.clone(), add_commit).expect("bob processes add");
     assert_eq!(
@@ -150,7 +152,7 @@ fn mimi_self_contained_welcome_round_trip() {
     let (snd_state_2, welcome_msg) =
         mimi_add_member(snd_state, snd_bundle.clone(), rcv_kp).expect("add receiver");
 
-    let rcv_state = mimi_process_welcome(
+    let (rcv_state, _) = mimi_process_welcome(
         welcome_msg.clone(),
         rcv_bundle.clone(),
         Vec::new(),
@@ -528,7 +530,7 @@ fn mimi_accept_external_remove_proposal_does_not_leak_plaintext_on_wrong_message
 
     let alice_s = mimi_create_group("leak_group".to_string(), alice.clone()).expect("create");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let bob_s = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
+    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
         .expect("bob joins");
 
     const SECRET_MARKER: &str = "SECRET-PLAINTEXT-MARKER-DO-NOT-LEAK";
@@ -753,7 +755,7 @@ fn appsync_commit_surfaces_the_committer_and_still_surfaces_the_roster() {
 
     let alice_s = mimi_create_group("as-snd-group".to_string(), alice.clone()).expect("create");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let bob_s = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
+    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
         .expect("bob joins");
 
     let roster = vec![0x81, 0x83, 0x02];
@@ -781,5 +783,51 @@ fn appsync_commit_surfaces_the_committer_and_still_surfaces_the_roster() {
         hex::encode_upper(&sender.signature_key),
         bob_real,
         "the surfaced sender must not be the member processing the commit"
+    );
+}
+
+/// RFC 9420 §16.8 single-use, on the AppSync Welcome path. A KeyPackage consumed by one AppSync
+/// Welcome must not open a second one. `mimi_process_welcome` returns the caller's bundle with the
+/// consumed KeyPackage retired, the same way the non-appsync `process_welcome` does, so replaying that
+/// KeyPackage into a second Welcome is rejected. Without the retirement the second join would succeed
+/// and this test would fail.
+#[test]
+fn an_appsync_consumed_keypackage_cannot_open_a_second_welcome() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@ku.test".to_string(), now).expect("generate alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@ku.test".to_string(), now).expect("generate bob");
+    // Opaque roster payload; the KeyPackage retirement, not roster surfacing, is what this asserts.
+    let roster = vec![0x81, 0x81, 0x00];
+
+    // Alice creates two AppSync groups and adds Bob to each with the SAME published KeyPackage.
+    let g1 = mimi_create_group("ku-as-g1".to_string(), alice.clone()).expect("create g1");
+    let (_g1, welcome1, _c1) =
+        mimi_add_member_commit_appsync(g1, alice.clone(), bob_kp.clone(), roster.clone())
+            .expect("add bob to g1");
+    let g2 = mimi_create_group("ku-as-g2".to_string(), alice.clone()).expect("create g2");
+    let (_g2, welcome2, _c2) =
+        mimi_add_member_commit_appsync(g2, alice, bob_kp, roster).expect("add bob to g2");
+
+    // Bob joins group 1; the returned bundle has the consumed KeyPackage retired.
+    let (_state1, bob_after) = mimi_process_welcome(welcome1, bob, Vec::new(), String::new())
+        .expect("first Welcome joins");
+
+    // The field copy of the consumed KeyPackage's private material must be cleared, not merely retired
+    // from storage_map: the second copy in key_package_bundle is otherwise recoverable at rest.
+    let parsed: crate::mls::IdentityBundle =
+        serde_json::from_slice(&bob_after).expect("deserialize retired bundle");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "the consumed KeyPackage's private bundle must be cleared from the AppSync-retired bundle"
+    );
+
+    // The consumed KeyPackage must not open the second Welcome (single-use).
+    let second = mimi_process_welcome(welcome2, bob_after, Vec::new(), String::new());
+    assert!(
+        second.is_err(),
+        "a KeyPackage consumed by one AppSync Welcome opened a second one - RFC 9420 §16.8 single-use \
+         violated"
     );
 }

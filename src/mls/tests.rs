@@ -581,7 +581,7 @@ fn mimi_group_create_add_welcome_round_trips_after_zeroize_refactor() {
     let (_group_state_a2, welcome) =
         mimi_add_member(group_state_a, bundle_a, kp_b).expect("mimi_add_member");
 
-    let group_state_b = mimi_process_welcome(welcome, bundle_b, Vec::new(), String::new())
+    let (group_state_b, _) = mimi_process_welcome(welcome, bundle_b, Vec::new(), String::new())
         .expect("mimi_process_welcome");
     let state_b: GroupState = serde_json::from_slice(&group_state_b).expect("deserialize");
     assert_eq!(state_b.group_id, b"mimi-test-group");

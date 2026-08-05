@@ -750,6 +750,13 @@ pub fn mls_process_commit_appsync(
     ))
 }
 
+/// Process an AppSync-lane Welcome to join a group.
+///
+/// Returns `(new_group_state, updated_bundle)`, the same shape as the non-appsync
+/// [`crate::mls::groups::process_welcome`]. The updated bundle is the caller's bundle with the
+/// KeyPackage this join consumed retired (single-use, RFC 9420 §16.8), so a replayed second Welcome for
+/// the same KeyPackage is rejected; the caller MUST persist the returned bundle in place of the input.
+///
 /// Hub-identity pinning on join: `mimi_accept_external_remove_proposal` only ever checks
 /// `Sender::External(index 0)` - a POSITION in the group's `ExternalSendersExtension`, not an
 /// IDENTITY. Without this check, a member could join a valid group whose inviter placed an
@@ -766,7 +773,7 @@ pub fn mimi_process_welcome(
     bundle_bytes: Vec<u8>,
     expected_hub_signature_key_bytes: Vec<u8>,
     expected_hub_credential_identity: String,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     // Wrap the owned bundle input on entry (see crate::mls::groups::
     // process_welcome's comment). mls_welcome_message_bytes is an MLS Welcome (HPKE-sealed
     // wire form) and expected_hub_signature_key_bytes is the hub's PUBLIC key - neither is
@@ -775,9 +782,17 @@ pub fn mimi_process_welcome(
     let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
     let provider = OpenMlsRustCrypto::default();
+    // Snapshot the caller's KeyPackage storage and reject aliased entries before the join, the same way
+    // the non-appsync path does: an alias K_A -> serialized_bundle(B) beside the genuine K_B -> B would
+    // let a spent KeyPackage replay a later Welcome. The snapshot is diffed against post-join storage to
+    // retire the KeyPackage this join consumes.
+    let original_storage = crate::mls::groups::reject_aliased_kp_entries(
+        mem::take(&mut identity.storage_map),
+        &provider,
+    );
     {
         let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut identity.storage_map).into_iter().collect();
+        *values = original_storage.iter().cloned().collect();
     }
 
     crate::mls::check_wire_size(&mls_welcome_message_bytes, "mimi_process_welcome Welcome")?;
@@ -838,15 +853,27 @@ pub fn mimi_process_welcome(
         );
     }
 
-    let storage_map = {
+    let post_join_storage: Vec<(Vec<u8>, Vec<u8>)> = {
         let values = provider.storage().values.read().unwrap();
         values.clone().into_iter().collect()
     };
+    // Retire the KeyPackage the join consumed from the caller's bundle so it cannot open a second
+    // Welcome (RFC 9420 §16.8 single-use), returning the bundle the caller persists in place of the
+    // input. Shared with the non-appsync path so the single-use retirement is one implementation.
+    let updated_bundle_bytes = crate::mls::groups::retire_consumed_key_package(
+        identity,
+        original_storage,
+        &post_join_storage,
+        &provider,
+    )?;
     let state = GroupState {
         group_id: group.group_id().to_vec(),
-        storage_map,
+        storage_map: post_join_storage,
     };
-    Ok(crate::mls::zeroizing_json(&state)?.to_vec())
+    Ok((
+        crate::mls::zeroizing_json(&state)?.to_vec(),
+        updated_bundle_bytes.to_vec(),
+    ))
 }
 
 #[cfg(test)]

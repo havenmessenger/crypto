@@ -656,7 +656,7 @@ fn kp_entry_key_matches_value(key: &[u8], value: &[u8], provider: &impl OpenMlsP
 /// own `Drop` can no longer wipe it, and `Vec::retain` would free the allocation un-zeroized. Kept
 /// entries (matching KeyPackage keys, and all non-KeyPackage entries) are returned unchanged. See
 /// `kp_entry_key_matches_value` for the accept/reject predicate.
-fn reject_aliased_kp_entries(
+pub(crate) fn reject_aliased_kp_entries(
     storage: Vec<(Vec<u8>, Vec<u8>)>,
     provider: &impl OpenMlsProvider,
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -669,6 +669,57 @@ fn reject_aliased_kp_entries(
         }
     }
     kept
+}
+
+/// Retire the KeyPackage a join consumed from a caller's bundle, returning the bundle to persist.
+///
+/// A KeyPackage is single-use (RFC 9420 §16.8): once it has opened a Welcome it must not open a second
+/// one. OpenMLS deletes the consumed KeyPackage from provider storage during the join, so the set of
+/// storage keys that survived the join is the one authenticated fact both halves of the retirement
+/// derive from:
+///
+///  (a) `storage_map` — keep exactly the entries that survived, dropping the ones OpenMLS deleted (the
+///      spent KeyPackage and its private init/encryption material). Dropped values are secret, so they
+///      are zeroized rather than freed unwiped.
+///  (b) `key_package_bundle` — this field holds a SECOND copy of the KeyPackage including its private
+///      HPKE material. Retiring (a) alone leaves that copy recoverable and reconstructable into storage,
+///      so single-use requires clearing it. The clear is bound to whether the field's OWN KeyPackage
+///      survived the join, NOT to its self-reported `last_resort()` flag: the field and the storage
+///      KeyPackage OpenMLS consumed can diverge, so trusting the flag could keep a spent KeyPackage or
+///      drop a live one. A last-resort KeyPackage is reusable by design — OpenMLS does not delete it —
+///      so its key survives, (a) removes nothing, and (b) keeps the field. A consumed, forged, or
+///      unbacked field KeyPackage is absent from the survivors and is cleared, fail closed.
+pub(crate) fn retire_consumed_key_package(
+    mut identity: IdentityBundle,
+    original_storage: Vec<(Vec<u8>, Vec<u8>)>,
+    post_join_storage: &[(Vec<u8>, Vec<u8>)],
+    provider: &impl OpenMlsProvider,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let surviving_keys: std::collections::HashSet<Vec<u8>> =
+        post_join_storage.iter().map(|(k, _)| k.clone()).collect();
+
+    let field_kp_survives = identity
+        .key_package_bundle
+        .as_ref()
+        .and_then(|kpb| kp_storage_key(kpb.key_package(), provider).ok())
+        .is_some_and(|storage_key| surviving_keys.contains(&storage_key));
+
+    // (a): keep the entries that survived the join; zeroize the retired (secret) values rather than
+    // dropping them unwiped.
+    let mut kept: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(original_storage.len());
+    for (k, mut v) in original_storage {
+        if surviving_keys.contains(&k) {
+            kept.push((k, v));
+        } else {
+            v.zeroize();
+        }
+    }
+    identity.storage_map = kept;
+    // (b): clear the second copy unless the field's own KeyPackage survived the join (last-resort).
+    if !field_kp_survives {
+        identity.key_package_bundle = None;
+    }
+    crate::mls::zeroizing_json(&identity)
 }
 
 /// Process a Welcome message to join a group.
@@ -801,50 +852,10 @@ pub fn process_welcome(
         values.clone().into_iter().collect()
     };
 
-    // Retire the consumed KeyPackage from the caller's bundle so it cannot open a second Welcome
-    // (RFC 9420 §16.8 single-use). Both halves derive from ONE authenticated fact - which storage
-    // keys survived the join:
-    //
-    //  (a) storage_map - keep exactly the entries that survived the join, dropping the ones
-    //      OpenMLS deleted (the spent KeyPackage + its private init/encryption material). Those
-    //      dropped values are secret, so they are zeroized rather than merely dropped.
-    //  (b) key_package_bundle - this field carries a SECOND copy of the same KeyPackage incl. its
-    //      private HPKE material. Retiring (a) alone leaves that copy recoverable at rest and
-    //      reconstructable back into provider storage, so single-use requires clearing it to None.
-    //      The clear decision is bound to whether the field's OWN KeyPackage survived, NOT to its
-    //      self-reported last_resort() flag: the field and the storage KeyPackage OpenMLS consumed
-    //      can diverge (multiple KeyPackages, or a serde-edited bundle), so trusting the flag could
-    //      preserve a spent KeyPackage or drop a live one.
-    //
-    // A last-resort KeyPackage is reusable by design: OpenMLS does not delete it (keys_for_welcome
-    // gates on `!last_resort()`), so its storage key survives - (a) removes nothing and (b) keeps
-    // the field as Some. A consumed, forged, or unbacked field KeyPackage is absent from the
-    // survivors and is cleared, fail closed.
-    let surviving_keys: std::collections::HashSet<Vec<u8>> =
-        post_join_storage.iter().map(|(k, _)| k.clone()).collect();
-
-    let field_kp_survives = identity
-        .key_package_bundle
-        .as_ref()
-        .and_then(|kpb| kp_storage_key(kpb.key_package(), &provider).ok())
-        .is_some_and(|storage_key| surviving_keys.contains(&storage_key));
-
-    // (a): keep the entries that survived the join; zeroize the retired (secret) values rather than
-    // dropping them unwiped.
-    let mut kept: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(original_storage.len());
-    for (k, mut v) in original_storage {
-        if surviving_keys.contains(&k) {
-            kept.push((k, v));
-        } else {
-            v.zeroize();
-        }
-    }
-    identity.storage_map = kept;
-    // (b): clear the second copy unless the field's own KeyPackage survived the join (last-resort).
-    if !field_kp_survives {
-        identity.key_package_bundle = None;
-    }
-    let updated_bundle_bytes = crate::mls::zeroizing_json(&identity)?;
+    // Retire the KeyPackage the join consumed from the caller's bundle so it cannot open a second
+    // Welcome (RFC 9420 §16.8 single-use). See `retire_consumed_key_package`.
+    let updated_bundle_bytes =
+        retire_consumed_key_package(identity, original_storage, &post_join_storage, &provider)?;
 
     let state = GroupState {
         group_id: group.group_id().to_vec(),
