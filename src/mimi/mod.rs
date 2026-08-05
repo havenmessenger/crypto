@@ -750,12 +750,56 @@ pub fn mls_process_commit_appsync(
     ))
 }
 
+/// Why an AppSync Welcome did not yield a joined group.
+///
+/// The distinction is load-bearing for single-use. `StagedWelcome::new_from_welcome` spends the
+/// KeyPackage as it decrypts the Welcome, before any application-level check can run and even if the
+/// caller never completes the join. So once the Welcome has opened, a later policy rejection must still
+/// hand the caller the retired bundle to persist, or the spent KeyPackage stays live and can open a
+/// second Welcome. `Rejected` carries that bundle; `Failed` is a failure before the KeyPackage was
+/// spent, so there is nothing to retire.
+#[derive(thiserror::Error)]
+pub enum MimiWelcomeError {
+    /// The Welcome could not be opened at all — no KeyPackage was consumed.
+    #[error("the Welcome could not be processed: {0}")]
+    Failed(#[from] anyhow::Error),
+    /// The Welcome opened (the KeyPackage was consumed) but a policy check rejected the join. The
+    /// caller MUST persist `retired_bundle` to preserve single-use, then discard the rejected join.
+    #[error("the Welcome opened but the join was rejected: {reason}")]
+    Rejected {
+        retired_bundle: Vec<u8>,
+        reason: String,
+    },
+}
+
+// Manual so a `.expect()` panic never dumps the private key material `retired_bundle` carries; it is
+// reported by length only, as `PublishedKeyPackage`'s Debug is.
+impl std::fmt::Debug for MimiWelcomeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(e) => f.debug_tuple("Failed").field(e).finish(),
+            Self::Rejected {
+                retired_bundle,
+                reason,
+            } => f
+                .debug_struct("Rejected")
+                .field("retired_bundle_len", &retired_bundle.len())
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
 /// Process an AppSync-lane Welcome to join a group.
 ///
 /// Returns `(new_group_state, updated_bundle)`, the same shape as the non-appsync
 /// [`crate::mls::groups::process_welcome`]. The updated bundle is the caller's bundle with the
 /// KeyPackage this join consumed retired (single-use, RFC 9420 §16.8), so a replayed second Welcome for
 /// the same KeyPackage is rejected; the caller MUST persist the returned bundle in place of the input.
+///
+/// A policy rejection after the Welcome has opened is a [`MimiWelcomeError::Rejected`] that still
+/// carries the retired bundle: the KeyPackage was already spent, so the caller persists the retirement
+/// even though it discards the rejected join.
 ///
 /// Hub-identity pinning on join: `mimi_accept_external_remove_proposal` only ever checks
 /// `Sender::External(index 0)` - a POSITION in the group's `ExternalSendersExtension`, not an
@@ -773,7 +817,7 @@ pub fn mimi_process_welcome(
     bundle_bytes: Vec<u8>,
     expected_hub_signature_key_bytes: Vec<u8>,
     expected_hub_credential_identity: String,
-) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
     // Wrap the owned bundle input on entry (see crate::mls::groups::
     // process_welcome's comment). mls_welcome_message_bytes is an MLS Welcome (HPKE-sealed
     // wire form) and expected_hub_signature_key_bytes is the hub's PUBLIC key - neither is
@@ -800,13 +844,33 @@ pub fn mimi_process_welcome(
         .map_err(|e| anyhow::anyhow!("Invalid MlsMessage: {:?}", e))?;
     let welcome = match mls_message.extract() {
         MlsMessageBodyIn::Welcome(w) => w,
-        _ => return Err(anyhow::anyhow!("Message is not a Welcome")),
+        _ => return Err(anyhow::anyhow!("Message is not a Welcome").into()),
     };
 
     // INV-MLS-002 explicit accept-gate (MIMI foreign-ingest): refuse a foreign-suite Welcome before
     // StagedWelcome - a MIMI provider takes objects whose suite the REMOTE chooses, so this gate is
     // mandatory here (the native emergent protections do not apply).
     crate::suite_policy::gate_inbound_welcome(&welcome)?;
+
+    // Build the expected hub entry BEFORE the join, so a malformed expectation fails while the
+    // KeyPackage is still unspent (a Failed, nothing to retire). An empty expected key is a hub-less
+    // group and pins nothing. `ExternalSender`'s fields are pub(crate) in openmls, so the pin compares
+    // TLS-serialized bytes - byte-identical serialization IS structural equality for this type, built
+    // the exact way `mimi_create_group_with_external_senders` builds the real one.
+    let expected_hub_entry: Option<Vec<u8>> = if expected_hub_signature_key_bytes.is_empty() {
+        None
+    } else {
+        let expected_pub = SignaturePublicKey::try_from(expected_hub_signature_key_bytes)
+            .map_err(|_| anyhow::anyhow!("Invalid expected hub signature key bytes"))?;
+        let expected_credential: Credential =
+            BasicCredential::new(expected_hub_credential_identity.into_bytes()).into();
+        let expected_entry = ExternalSender::new(expected_pub, expected_credential);
+        Some(
+            expected_entry
+                .tls_serialize_detached()
+                .map_err(|e| anyhow::anyhow!("Failed to serialize expected hub entry: {e:?}"))?,
+        )
+    };
 
     let mls_group_config = MlsGroupJoinConfig::builder()
         // Same MIXED_PLAINTEXT rationale as mimi_create_group above: a member who JOINS a mimi-lane
@@ -822,58 +886,49 @@ pub fn mimi_process_welcome(
         .into_group(&provider)
         .map_err(|e| anyhow::anyhow!("Error joining group: {:?}", e))?;
 
-    // Pin the configured hub credential - only when the caller actually expects one (a
-    // hub-less group skips this, preserving prior behavior). `ExternalSender`'s fields are
-    // pub(crate) in openmls, so this compares TLS-SERIALIZED bytes rather than reaching into
-    // private accessors - byte-identical serialization IS structural equality for this type, and
-    // it's built the exact same way `mimi_create_group_with_external_senders` builds the real one.
-    if !expected_hub_signature_key_bytes.is_empty() {
-        let expected_pub = SignaturePublicKey::try_from(expected_hub_signature_key_bytes)
-            .map_err(|_| anyhow::anyhow!("Invalid expected hub signature key bytes"))?;
-        let expected_credential: Credential =
-            BasicCredential::new(expected_hub_credential_identity.into_bytes()).into();
-        let expected_entry = ExternalSender::new(expected_pub, expected_credential);
-        let expected_bytes = expected_entry
-            .tls_serialize_detached()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize expected hub entry: {e:?}"))?;
-
-        let actual_matches = match group.extensions().external_senders() {
-            Some(list) if list.len() == 1 => {
-                let actual_bytes = list[0]
-                    .tls_serialize_detached()
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize actual hub entry: {e:?}"))?;
-                actual_bytes == expected_bytes
-            }
-            _ => false,
-        };
-        anyhow::ensure!(
-            actual_matches,
-            "mimi_process_welcome: joined group's external_senders does not match the expected \
-             hub credential (hub-identity pin failed)"
-        );
-    }
-
+    // The KeyPackage is now spent (openmls deletes it during new_from_welcome, even without into_group),
+    // so retire it from the caller's bundle BEFORE the hub-pin decision. The retirement then reaches the
+    // caller whether the join is accepted or rejected - a rejected join must still spend the KeyPackage,
+    // or the spent one stays live and opens a second Welcome. Shared with the non-appsync path so the
+    // single-use retirement is one implementation.
     let post_join_storage: Vec<(Vec<u8>, Vec<u8>)> = {
         let values = provider.storage().values.read().unwrap();
         values.clone().into_iter().collect()
     };
-    // Retire the KeyPackage the join consumed from the caller's bundle so it cannot open a second
-    // Welcome (RFC 9420 §16.8 single-use), returning the bundle the caller persists in place of the
-    // input. Shared with the non-appsync path so the single-use retirement is one implementation.
-    let updated_bundle_bytes = crate::mls::groups::retire_consumed_key_package(
+    let retired_bundle = crate::mls::groups::retire_consumed_key_package(
         identity,
         original_storage,
         &post_join_storage,
         &provider,
-    )?;
-    let state = GroupState {
+    )?
+    .to_vec();
+    let state_bytes = crate::mls::zeroizing_json(&GroupState {
         group_id: group.group_id().to_vec(),
         storage_map: post_join_storage,
-    };
-    Ok((
-        crate::mls::zeroizing_json(&state)?.to_vec(),
-        updated_bundle_bytes.to_vec(),
-    ))
+    })?
+    .to_vec();
+
+    // Pin the configured hub credential. On failure the join is rejected, but the KeyPackage was already
+    // spent, so the retirement travels with the rejection for the caller to persist.
+    if let Some(expected_bytes) = expected_hub_entry {
+        let matches = match group.extensions().external_senders() {
+            Some(list) if list.len() == 1 => list[0]
+                .tls_serialize_detached()
+                .map(|actual| actual == expected_bytes)
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !matches {
+            return Err(MimiWelcomeError::Rejected {
+                retired_bundle,
+                reason:
+                    "joined group's external_senders does not match the expected hub credential"
+                        .to_string(),
+            });
+        }
+    }
+
+    Ok((state_bytes, retired_bundle))
 }
 
 #[cfg(test)]

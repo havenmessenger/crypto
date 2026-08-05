@@ -831,3 +831,61 @@ fn an_appsync_consumed_keypackage_cannot_open_a_second_welcome() {
          violated"
     );
 }
+
+/// A join REJECTED by the hub-pin still spends the KeyPackage. `mimi_process_welcome` retires the
+/// consumed KeyPackage before the hub-pin decision and returns `Rejected` carrying the retired bundle,
+/// so a second Welcome for that KeyPackage is refused. Without carrying the retirement on the error
+/// path, the caller would keep the spent KeyPackage and a second Welcome could reuse it.
+#[test]
+fn an_appsync_welcome_retires_the_keypackage_even_when_the_hub_pin_rejects_the_join() {
+    let now = now_secs();
+    let (_aid, _akp, alice) =
+        crate::identity::generate_identity("alice@rej.test".to_string(), now).expect("alice");
+    let (_bid, bob_kp, bob) =
+        crate::identity::generate_identity("bob@rej.test".to_string(), now).expect("bob");
+    let (_hid, _hkp, real_hub) =
+        crate::identity::generate_identity("hub@rej.test".to_string(), now).expect("hub");
+    let (_wid, _wkp, wrong_hub) =
+        crate::identity::generate_identity("attacker-hub@rej.test".to_string(), now)
+            .expect("wrong hub");
+    let (_rs, real_hub_pubkey) = raw_signer_and_pubkey(&real_hub);
+    let (_ws, wrong_hub_pubkey) = raw_signer_and_pubkey(&wrong_hub);
+
+    // Group 1 names the real hub; group 2 is where the same KeyPackage would be replayed.
+    let g1 = mimi_create_group_with_external_senders(
+        "rej-g1".to_string(),
+        alice.clone(),
+        real_hub_pubkey.as_slice().to_vec(),
+        "hub@rej.test".to_string(),
+    )
+    .expect("create g1 with hub");
+    let (_g1, welcome1) =
+        mimi_add_member(g1, alice.clone(), bob_kp.clone()).expect("add bob to g1");
+    let g2 = mimi_create_group("rej-g2".to_string(), alice.clone()).expect("create g2");
+    let (_g2, welcome2) = mimi_add_member(g2, alice, bob_kp).expect("add bob to g2");
+
+    // Bob joins g1 but expects the WRONG hub: the join is rejected, and the KeyPackage is retired anyway.
+    let retired_bundle = match mimi_process_welcome(
+        welcome1,
+        bob,
+        wrong_hub_pubkey.as_slice().to_vec(),
+        "hub@rej.test".to_string(),
+    ) {
+        Err(MimiWelcomeError::Rejected { retired_bundle, .. }) => retired_bundle,
+        other => panic!("expected a hub-pin Rejected carrying the retired bundle, got {other:?}"),
+    };
+    let parsed: crate::mls::IdentityBundle =
+        serde_json::from_slice(&retired_bundle).expect("deserialize retired bundle");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "a rejected join must still retire the consumed KeyPackage's private bundle"
+    );
+
+    // The retired KeyPackage must not open the second Welcome.
+    let second = mimi_process_welcome(welcome2, retired_bundle, Vec::new(), String::new());
+    assert!(
+        second.is_err(),
+        "a KeyPackage spent by a rejected join opened a second Welcome - single-use hole on the error \
+         path"
+    );
+}
