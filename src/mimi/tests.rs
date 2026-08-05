@@ -871,8 +871,11 @@ fn an_appsync_welcome_retires_the_keypackage_even_when_the_hub_pin_rejects_the_j
         wrong_hub_pubkey.as_slice().to_vec(),
         "hub@rej.test".to_string(),
     ) {
-        Err(MimiWelcomeError::Rejected { retired_bundle, .. }) => retired_bundle,
-        other => panic!("expected a hub-pin Rejected carrying the retired bundle, got {other:?}"),
+        Err(MimiWelcomeError::Spent { retired_bundle, .. }) => retired_bundle,
+        Err(MimiWelcomeError::Unspent(e)) => {
+            panic!("expected a hub-pin Spent carrying the retired bundle, got Unspent: {e}")
+        }
+        Ok(_) => panic!("a hub-pin mismatch must reject the join, not return Ok"),
     };
     let parsed: crate::mls::IdentityBundle =
         serde_json::from_slice(&retired_bundle).expect("deserialize retired bundle");
@@ -887,5 +890,57 @@ fn an_appsync_welcome_retires_the_keypackage_even_when_the_hub_pin_rejects_the_j
         second.is_err(),
         "a KeyPackage spent by a rejected join opened a second Welcome - single-use hole on the error \
          path"
+    );
+}
+
+/// The single-use hole the earlier fix missed: `StagedWelcome::new_from_welcome` deletes the KeyPackage
+/// from provider storage BEFORE it finishes validating the Welcome, so a Welcome that opens far enough to
+/// spend the KeyPackage but then fails a later decryption step must STILL return the retirement, or the
+/// spent KeyPackage stays live and opens a second Welcome. A byte flipped in the tail of the Welcome
+/// (inside the encrypted group info) survives TLS framing and the suite gate, is found and deleted by
+/// `keys_for_welcome`, then fails to decrypt - the reachable post-spend failure. Mutation guard: routing
+/// the post-spend error back through the bundle-less `Unspent` reddens the `Spent` match below.
+#[test]
+fn a_post_spend_welcome_failure_retires_the_keypackage() {
+    let now = now_secs();
+    let (_aid, _akp, alice) =
+        crate::identity::generate_identity("alice@spend.test".to_string(), now).expect("alice");
+    let (_bid, bob_kp, bob) =
+        crate::identity::generate_identity("bob@spend.test".to_string(), now).expect("bob");
+
+    // Two groups adding the SAME bob KeyPackage: welcome1 is corrupted to fail post-spend, welcome2 is
+    // the valid replay attempt for the same KeyPackage.
+    let g1 = mimi_create_group("spend-g1".to_string(), alice.clone()).expect("create g1");
+    let (_g1, welcome1) =
+        mimi_add_member(g1, alice.clone(), bob_kp.clone()).expect("add bob to g1");
+    let g2 = mimi_create_group("spend-g2".to_string(), alice.clone()).expect("create g2");
+    let (_g2, welcome2) = mimi_add_member(g2, alice, bob_kp).expect("add bob to g2");
+
+    // Flip a byte in the tail (encrypted group info): the TLS structure and the suite still parse, the
+    // KeyPackage is found and deleted, then the group-info AEAD fails - an Err AFTER the spend.
+    let mut corrupted = welcome1;
+    let last = corrupted.len() - 1;
+    corrupted[last] ^= 0xff;
+
+    let retired_bundle = match mimi_process_welcome(corrupted, bob, Vec::new(), String::new()) {
+        Err(MimiWelcomeError::Spent { retired_bundle, .. }) => retired_bundle,
+        Err(MimiWelcomeError::Unspent(e)) => panic!(
+            "corruption landed BEFORE the spend (Unspent: {e}); this test needs a post-spend failure"
+        ),
+        Ok(_) => panic!("a corrupted Welcome must not open a group"),
+    };
+    let parsed: crate::mls::IdentityBundle =
+        serde_json::from_slice(&retired_bundle).expect("deserialize retired bundle");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "a post-spend failure must still retire the consumed KeyPackage's private bundle"
+    );
+
+    // The retired KeyPackage must not open the second, valid Welcome.
+    let second = mimi_process_welcome(welcome2, retired_bundle, Vec::new(), String::new());
+    assert!(
+        second.is_err(),
+        "a KeyPackage spent by a failed join opened a second Welcome - single-use hole on the \
+         post-spend error path"
     );
 }

@@ -16,7 +16,9 @@
 //! (see per-lint comments below). `unwrap_used` is allowed module-wide ONLY because every
 //! `.unwrap()` is the SAME pattern - acquiring an in-memory `RwLock` guard on a
 //! freshly-created single-threaded `OpenMlsRustCrypto` provider's storage, where lock
-//! poisoning is unreachable.
+//! poisoning is unreachable. The one exception is the post-spend read in `mimi_process_welcome`:
+//! it runs after a `catch_unwind` that could have poisoned the guard mid-write, so that read
+//! alone is poison-tolerant (`PoisonError::into_inner`) rather than `.unwrap()`.
 #![allow(
     clippy::unwrap_used, // in-memory provider RwLock guards only (see module doc)
     clippy::uninlined_format_args, // format-arg style only, not a correctness concern
@@ -750,23 +752,30 @@ pub fn mls_process_commit_appsync(
     ))
 }
 
-/// Why an AppSync Welcome did not yield a joined group.
+/// Why an AppSync Welcome did not yield a joined group, framed by the single-use status of the
+/// KeyPackage - the one fact the caller must act on.
 ///
-/// The distinction is load-bearing for single-use. `StagedWelcome::new_from_welcome` spends the
-/// KeyPackage as it decrypts the Welcome, before any application-level check can run and even if the
-/// caller never completes the join. So once the Welcome has opened, a later policy rejection must still
-/// hand the caller the retired bundle to persist, or the spent KeyPackage stays live and can open a
-/// second Welcome. `Rejected` carries that bundle; `Failed` is a failure before the KeyPackage was
-/// spent, so there is nothing to retire.
+/// `StagedWelcome::new_from_welcome` SPENDS the KeyPackage (OpenMLS deletes it from provider storage)
+/// as it opens the Welcome, before it finishes decrypting or validating it and even if the caller never
+/// completes the join. So "the join did not complete" splits into two cases the caller must treat
+/// oppositely:
+///
+///  - `Unspent`: the failure happened before the KeyPackage was spent - it is still live and usable,
+///    and there is nothing to retire.
+///  - `Spent`: the KeyPackage was consumed. Whatever the reason the join did not finish - a hub-pin
+///    rejection, or a post-spend failure while opening or joining - the caller MUST persist
+///    `retired_bundle` in place of its input bundle, or the spent KeyPackage stays live and opens a
+///    second Welcome. One "you must persist this" variant, so a caller cannot honor one spent case and
+///    miss another.
 #[derive(thiserror::Error)]
 pub enum MimiWelcomeError {
-    /// The Welcome could not be opened at all — no KeyPackage was consumed.
+    /// The KeyPackage was NOT consumed - still live and usable; nothing to retire.
     #[error("the Welcome could not be processed: {0}")]
-    Failed(#[from] anyhow::Error),
-    /// The Welcome opened (the KeyPackage was consumed) but a policy check rejected the join. The
-    /// caller MUST persist `retired_bundle` to preserve single-use, then discard the rejected join.
-    #[error("the Welcome opened but the join was rejected: {reason}")]
-    Rejected {
+    Unspent(#[from] anyhow::Error),
+    /// The KeyPackage WAS consumed but the join did not complete (a policy rejection or a post-spend
+    /// failure). The caller MUST persist `retired_bundle` to preserve single-use, then discard the join.
+    #[error("the Welcome spent the KeyPackage but the join did not complete: {reason}")]
+    Spent {
         retired_bundle: Vec<u8>,
         reason: String,
     },
@@ -777,12 +786,12 @@ pub enum MimiWelcomeError {
 impl std::fmt::Debug for MimiWelcomeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Failed(e) => f.debug_tuple("Failed").field(e).finish(),
-            Self::Rejected {
+            Self::Unspent(e) => f.debug_tuple("Unspent").field(e).finish(),
+            Self::Spent {
                 retired_bundle,
                 reason,
             } => f
-                .debug_struct("Rejected")
+                .debug_struct("Spent")
                 .field("retired_bundle_len", &retired_bundle.len())
                 .field("reason", reason)
                 .finish(),
@@ -797,9 +806,10 @@ impl std::fmt::Debug for MimiWelcomeError {
 /// KeyPackage this join consumed retired (single-use, RFC 9420 §16.8), so a replayed second Welcome for
 /// the same KeyPackage is rejected; the caller MUST persist the returned bundle in place of the input.
 ///
-/// A policy rejection after the Welcome has opened is a [`MimiWelcomeError::Rejected`] that still
-/// carries the retired bundle: the KeyPackage was already spent, so the caller persists the retirement
-/// even though it discards the rejected join.
+/// Any failure after the Welcome has opened - a policy rejection OR a post-spend error while opening or
+/// joining - is a [`MimiWelcomeError::Spent`] that still carries the retired bundle: the KeyPackage was
+/// already consumed, so the caller persists the retirement even though it discards the join. A failure
+/// before the KeyPackage is spent is a [`MimiWelcomeError::Unspent`], with nothing to retire.
 ///
 /// Hub-identity pinning on join: `mimi_accept_external_remove_proposal` only ever checks
 /// `Sender::External(index 0)` - a POSITION in the group's `ExternalSendersExtension`, not an
@@ -812,6 +822,10 @@ impl std::fmt::Debug for MimiWelcomeError {
 /// Pass empty strings/bytes to skip the check for a group with no hub at all (the current
 /// `mimi_create_group` production path never populates `external_senders`) - this preserves prior
 /// behavior for the hub-less case while closing the gap for the hub-mediated one.
+// The single-use invariant needs the spend boundary, the poison-tolerant post-spend read, and a
+// fail-closed retirement on every post-spend exit inline in one sequence; splitting it would scatter
+// that boundary across helpers and make the "spent or not" decision harder to audit at one glance.
+#[allow(clippy::too_many_lines)]
 pub fn mimi_process_welcome(
     mls_welcome_message_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
@@ -879,37 +893,94 @@ pub fn mimi_process_welcome(
         // non-creator member commits.
         .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
         .build();
-    // None: the ratchet tree is embedded in the Welcome (use_ratchet_tree_extension).
-    let staged_join = StagedWelcome::new_from_welcome(&provider, &mls_group_config, welcome, None)
-        .map_err(|e| anyhow::anyhow!("Error processing Welcome: {:?}", e))?;
-    let group = staged_join
-        .into_group(&provider)
-        .map_err(|e| anyhow::anyhow!("Error joining group: {:?}", e))?;
+    // A fail-closed retirement to fall back on if the join spends the KeyPackage but the precise
+    // post-join retirement cannot be built (a caught post-deletion panic, or the retirement itself
+    // erroring). Serialized BEFORE the spend, so no post-spend fallible step can lose the artifact.
+    let conservative = crate::mls::groups::conservative_retirement(&identity, &original_storage)?;
 
-    // The KeyPackage is now spent (openmls deletes it during new_from_welcome, even without into_group),
-    // so retire it from the caller's bundle BEFORE the hub-pin decision. The retirement then reaches the
-    // caller whether the join is accepted or rejected - a rejected join must still spend the KeyPackage,
-    // or the spent one stays live and opens a second Welcome. Shared with the non-appsync path so the
-    // single-use retirement is one implementation.
+    // THE SPEND BOUNDARY. OpenMLS deletes the (non-last-resort) KeyPackage from provider storage at the
+    // very start of new_from_welcome, before it finishes decrypting/validating the Welcome - so BOTH
+    // new_from_welcome and into_group can fail (corrupted group secrets, a missing embedded ratchet
+    // tree, a confirmation-tag mismatch, an into_group error) AFTER the KeyPackage is already spent. A
+    // confirmation-tag mismatch is a debug-build panic (openmls `debug_assert!`) that becomes a plain
+    // Err in release; catch_unwind so even that path can still return the retirement. None: the ratchet
+    // tree is embedded in the Welcome (use_ratchet_tree_extension).
+    let join: anyhow::Result<MlsGroup> =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let staged =
+                StagedWelcome::new_from_welcome(&provider, &mls_group_config, welcome, None)
+                    .map_err(|e| anyhow::anyhow!("Error processing Welcome: {:?}", e))?;
+            staged
+                .into_group(&provider)
+                .map_err(|e| anyhow::anyhow!("Error joining group: {:?}", e))
+        })) {
+            Ok(result) => result,
+            Err(_panic) => Err(anyhow::anyhow!("panic while opening the Welcome")),
+        };
+
+    // Read provider storage AFTER the boundary, regardless of Ok/Err/panic. This is the ONE read that
+    // cannot rely on the module's "lock never poisons" invariant - a caught panic could have poisoned
+    // the guard mid-write - so it alone is poison-tolerant rather than `.unwrap()`.
     let post_join_storage: Vec<(Vec<u8>, Vec<u8>)> = {
-        let values = provider.storage().values.read().unwrap();
+        let values = provider
+            .storage()
+            .values
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         values.clone().into_iter().collect()
     };
-    let retired_bundle = crate::mls::groups::retire_consumed_key_package(
+    // The KeyPackage is spent iff one of the caller's original storage keys no longer survives.
+    let spent = original_storage
+        .iter()
+        .any(|(k, _)| !post_join_storage.iter().any(|(pk, _)| pk == k));
+
+    let group = match join {
+        Ok(group) => group,
+        Err(e) => {
+            // A failure before the spend leaves the KeyPackage live (Unspent, nothing to retire); a
+            // failure after it must still hand back the retirement (Spent) or the KeyPackage replays.
+            if spent {
+                let retired_bundle = crate::mls::groups::retire_consumed_key_package(
+                    identity,
+                    original_storage,
+                    &post_join_storage,
+                    &provider,
+                )
+                .map(|z| z.to_vec())
+                .unwrap_or_else(|_| conservative.to_vec());
+                return Err(MimiWelcomeError::Spent {
+                    retired_bundle,
+                    reason: format!("the join failed after the KeyPackage was spent: {e}"),
+                });
+            }
+            return Err(MimiWelcomeError::Unspent(e));
+        }
+    };
+
+    // The KeyPackage is now spent, so retire it from the caller's bundle. Shared with the non-appsync
+    // path so the single-use retirement is one implementation. If building the precise retirement fails,
+    // the KeyPackage is still spent - fail closed to the conservative retirement as a Spent and discard
+    // the join, rather than map the error to Unspent (which would drop the retirement of a spent KP).
+    let retired_bundle = match crate::mls::groups::retire_consumed_key_package(
         identity,
         original_storage,
         &post_join_storage,
         &provider,
-    )?
-    .to_vec();
-    let state_bytes = crate::mls::zeroizing_json(&GroupState {
-        group_id: group.group_id().to_vec(),
-        storage_map: post_join_storage,
-    })?
-    .to_vec();
+    ) {
+        Ok(bundle) => bundle.to_vec(),
+        Err(_) => {
+            return Err(MimiWelcomeError::Spent {
+                retired_bundle: conservative.to_vec(),
+                reason:
+                    "the join succeeded but the precise KeyPackage retirement could not be built"
+                        .to_string(),
+            });
+        }
+    };
 
-    // Pin the configured hub credential. On failure the join is rejected, but the KeyPackage was already
-    // spent, so the retirement travels with the rejection for the caller to persist.
+    // Pin the configured hub credential BEFORE serializing the joined state, so a rejection never builds
+    // (and then drops unwiped) a GroupState buffer. The KeyPackage is already spent, so the retirement
+    // travels with the rejection as a Spent for the caller to persist.
     if let Some(expected_bytes) = expected_hub_entry {
         let matches = match group.extensions().external_senders() {
             Some(list) if list.len() == 1 => list[0]
@@ -919,7 +990,7 @@ pub fn mimi_process_welcome(
             _ => false,
         };
         if !matches {
-            return Err(MimiWelcomeError::Rejected {
+            return Err(MimiWelcomeError::Spent {
                 retired_bundle,
                 reason:
                     "joined group's external_senders does not match the expected hub credential"
@@ -928,7 +999,23 @@ pub fn mimi_process_welcome(
         }
     }
 
-    Ok((state_bytes, retired_bundle))
+    // The KeyPackage is spent and retired; if the joined state cannot be serialized, still hand back the
+    // retirement (Spent) so the caller persists it, rather than drop it by mapping to Unspent.
+    let state_bytes = match crate::mls::zeroizing_json(&GroupState {
+        group_id: group.group_id().to_vec(),
+        storage_map: post_join_storage,
+    }) {
+        Ok(state) => state,
+        Err(_) => {
+            return Err(MimiWelcomeError::Spent {
+                retired_bundle,
+                reason: "the join succeeded but its group state could not be serialized"
+                    .to_string(),
+            });
+        }
+    };
+
+    Ok((state_bytes.to_vec(), retired_bundle))
 }
 
 #[cfg(test)]

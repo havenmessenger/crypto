@@ -722,6 +722,45 @@ pub(crate) fn retire_consumed_key_package(
     crate::mls::zeroizing_json(&identity)
 }
 
+/// A fail-closed retirement computed WITHOUT the post-join storage.
+///
+/// `retire_consumed_key_package` needs the post-join storage to know which KeyPackage the join spent.
+/// A caller that has already crossed the spend boundary but cannot obtain that precise answer — a caught
+/// post-deletion panic, or `retire_consumed_key_package` itself erroring — still owes the caller a
+/// retirement, or the spent KeyPackage stays live and opens a second Welcome. This is that fallback: it
+/// assumes every KeyPackage the caller holds was the consumable one and removes it, so it can only ever
+/// over-retire, never leave a spent KeyPackage live.
+///
+///  - `storage_map` — keep only the entries whose key is not `KeyPackage`-labelled. A second Welcome
+///    looks the KeyPackage up by its storage key; dropping every such entry makes that lookup miss, which
+///    is what blocks replay. The caller's own init/encryption private keys and identity entries are kept.
+///  - `key_package_bundle` — always cleared (the second private copy).
+///
+/// It deliberately over-retires: a last-resort KeyPackage (reusable by RFC 9420 §16.8) is dropped here
+/// too. That is an availability cost on an abnormal fallback path, never a single-use hole — the precise
+/// `retire_consumed_key_package` honors the last-resort exception on every normal path. Dropped values
+/// carry private HPKE material; `original_storage` is borrowed, so the caller's originals (which it drops
+/// and zeroizes) are the wiping owner, and this function clones only the kept, surviving entries.
+pub(crate) fn conservative_retirement(
+    identity: &IdentityBundle,
+    original_storage: &[(Vec<u8>, Vec<u8>)],
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let kept: Vec<(Vec<u8>, Vec<u8>)> = original_storage
+        .iter()
+        .filter(|(k, _)| !k.starts_with(b"KeyPackage"))
+        .cloned()
+        .collect();
+    let retired = IdentityBundle {
+        key_package_bundle: None,
+        private_key: identity.private_key.clone(),
+        signature_scheme: identity.signature_scheme,
+        public_key_bytes: identity.public_key_bytes.clone(),
+        user_id: identity.user_id.clone(),
+        storage_map: kept,
+    };
+    crate::mls::zeroizing_json(&retired)
+}
+
 /// Process a Welcome message to join a group.
 ///
 /// Returns `(new_group_state, updated_bundle)`. The updated bundle is the caller's bundle with
