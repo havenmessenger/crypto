@@ -16,7 +16,7 @@
 //! (see per-lint comments below). `unwrap_used` is allowed module-wide ONLY because every
 //! `.unwrap()` is the SAME pattern - acquiring an in-memory `RwLock` guard on a
 //! freshly-created single-threaded `OpenMlsRustCrypto` provider's storage, where lock
-//! poisoning is unreachable. The one exception is the post-spend read in `mimi_process_welcome`:
+//! poisoning is unreachable. The one exception is the post-spend read in `complete_welcome`:
 //! it runs after a `catch_unwind` that could have poisoned the guard mid-write, so that read
 //! alone is poison-tolerant (`PoisonError::into_inner`) rather than `.unwrap()`.
 #![allow(
@@ -40,7 +40,7 @@ use openmls_traits::OpenMlsProvider;
 use std::convert::TryFrom;
 use std::mem;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
 
@@ -799,61 +799,153 @@ impl std::fmt::Debug for MimiWelcomeError {
     }
 }
 
-/// Process an AppSync-lane Welcome to join a group.
+/// A Welcome whose fail-closed retirement has been built WITHOUT spending the KeyPackage.
 ///
-/// Returns `(new_group_state, updated_bundle)`, the same shape as the non-appsync
-/// [`crate::mls::groups::process_welcome`]. The updated bundle is the caller's bundle with the
-/// KeyPackage this join consumed retired (single-use, RFC 9420 §16.8), so a replayed second Welcome for
-/// the same KeyPackage is rejected; the caller MUST persist the returned bundle in place of the input.
+/// This is phase 1 of the crash-atomic single-use join (RFC 9420 §16.8): the fields carry the material
+/// [`complete_welcome`] needs to open the Welcome, plus [`PreparedWelcome::retired_bundle`] - the
+/// fail-closed retirement the caller MUST persist durably (in place of its input bundle) BEFORE calling
+/// [`complete_welcome`]. Persisting it first is what makes single-use crash-atomic: the KeyPackage's
+/// private init key is never used to open a Welcome until the durable state already reflects its
+/// retirement, so a crash/OOM/abort during the open cannot leave the KeyPackage both durably-live and
+/// replayable. See [`prepare_welcome_retirement`] / [`complete_welcome`].
 ///
-/// Any failure after the Welcome has opened - a policy rejection OR a post-spend error while opening or
-/// joining - is a [`MimiWelcomeError::Spent`] that still carries the retired bundle: the KeyPackage was
-/// already consumed, so the caller persists the retirement even though it discards the join. A failure
-/// before the KeyPackage is spent is a [`MimiWelcomeError::Unspent`], with nothing to retire.
+/// The ephemeral material (`identity`, `original_storage`, `welcome`) is secret-bearing and is wiped on
+/// drop; it is never durable and must not be persisted - only `retired_bundle` is.
+#[must_use = "the caller MUST persist retired_bundle() durably before calling complete_welcome"]
+pub struct PreparedWelcome {
+    // The fail-closed retirement the caller persists BEFORE complete_welcome (see accessor). Wiped on
+    // drop; the caller's persisted copy is the durable one.
+    retired_bundle: Vec<u8>,
+    // Ephemeral phase-2 material. `identity` self-wipes (its Drop); `original_storage` is wiped by this
+    // struct's Drop; `welcome`/`expected_hub_entry` are public wire bytes. `Option` so complete_welcome
+    // can move them out of a Drop type via `.take()` (Rust forbids moving fields out of a Drop type).
+    identity: Option<IdentityBundle>,
+    original_storage: Vec<(Vec<u8>, Vec<u8>)>,
+    welcome: Option<Welcome>,
+    expected_hub_entry: Option<Vec<u8>>,
+}
+
+impl PreparedWelcome {
+    /// The fail-closed retirement to persist durably (in place of the input bundle) BEFORE calling
+    /// [`complete_welcome`]. This is the single load-bearing output of phase 1: persisting it is what
+    /// closes the crash-atomicity window.
+    #[must_use]
+    pub fn retired_bundle(&self) -> &[u8] {
+        &self.retired_bundle
+    }
+}
+
+impl Drop for PreparedWelcome {
+    fn drop(&mut self) {
+        self.retired_bundle.zeroize();
+        for (_, v) in &mut self.original_storage {
+            v.zeroize();
+        }
+        // identity (Option<IdentityBundle>) self-wipes via IdentityBundle::drop if still Some;
+        // welcome and expected_hub_entry are HPKE-sealed / PUBLIC wire bytes, not secret material.
+    }
+}
+
+// Manual Debug so a stray `{:?}` never dumps the secret ephemeral material or the retirement (which
+// carries the surviving identity signing key), matching MimiWelcomeError's redaction.
+impl std::fmt::Debug for PreparedWelcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedWelcome")
+            .field("retired_bundle_len", &self.retired_bundle.len())
+            .field("completed", &self.identity.is_none())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A joined-group provider-storage snapshot whose secret values are zeroized on drop.
 ///
-/// Hub-identity pinning on join: `mimi_accept_external_remove_proposal` only ever checks
-/// `Sender::External(index 0)` - a POSITION in the group's `ExternalSendersExtension`, not an
-/// IDENTITY. Without this check, a member could join a valid group whose inviter placed an
-/// unintended credential in that slot, and later acceptance would treat proposals from it as the
-/// allowlisted hub. `expected_hub_signature_key_bytes`/`expected_hub_credential_identity`, when
-/// non-empty, let the caller pin the hub it actually configured for this room: the joined group's
-/// `ExternalSendersExtension` must be exactly the single entry matching what's expected, or the
-/// join fails closed (`Err` - the caller never receives a group state pinned to the wrong hub).
-/// Pass empty strings/bytes to skip the check for a group with no hub at all (the current
-/// `mimi_create_group` production path never populates `external_senders`) - this preserves prior
-/// behavior for the hub-less case while closing the gap for the hub-mediated one.
-// The single-use invariant needs the spend boundary, the poison-tolerant post-spend read, and a
-// fail-closed retirement on every post-spend exit inline in one sequence; splitting it would scatter
-// that boundary across helpers and make the "spent or not" decision harder to audit at one glance.
-#[allow(clippy::too_many_lines)]
-pub fn mimi_process_welcome(
+/// The snapshot holds joined-group epoch/message/ratchet secrets copied out of provider storage after
+/// the spend. On an early return (hub-pin rejection, serialization failure, a caught partial-join
+/// panic) no `GroupState` is ever constructed to own and wipe it, so without this wrapper the raw
+/// `Vec` would free unwiped, leaving ratchet material in allocator memory. On the success path the
+/// values move out via `mem::take` into `GroupState` (whose own `Drop` then owns the wipe), and this
+/// wrapper drops an empty `Vec`.
+struct PostJoinStorage(Vec<(Vec<u8>, Vec<u8>)>);
+
+impl Drop for PostJoinStorage {
+    fn drop(&mut self) {
+        for (_, v) in &mut self.0 {
+            v.zeroize();
+        }
+    }
+}
+
+/// The provider storage keys a Welcome's `EncryptedGroupSecrets` reference - the KeyPackage entries
+/// OpenMLS looks up to open it. Same layout as `crate::mls::groups::kp_storage_key` (the `KeyPackage`
+/// label, the serialized authenticated hash reference, the storage version). Uses only PUBLIC hash
+/// references from the Welcome - never a private init key - so identifying the target does not consume
+/// it. Coupled to `openmls_memory_storage`'s key layout, the same coupling the storage-key regression
+/// test (`field_clear_gate_matches_openmls_storage_key`) pins.
+fn welcome_target_storage_keys(welcome: &Welcome) -> anyhow::Result<Vec<Vec<u8>>> {
+    welcome
+        .secrets()
+        .iter()
+        .map(|egs| {
+            let mut key = b"KeyPackage".to_vec();
+            key.extend_from_slice(&serde_json::to_vec(&egs.new_member())?);
+            key.extend_from_slice(&openmls_traits::storage::CURRENT_VERSION.to_be_bytes());
+            Ok(key)
+        })
+        .collect()
+}
+
+/// PHASE 1 of the crash-atomic AppSync Welcome join: build the fail-closed retirement WITHOUT spending
+/// the KeyPackage.
+///
+/// Runs every pre-spend check ([`MimiWelcomeError::Unspent`] on failure - the KeyPackage is still live
+/// and there is nothing to retire): parse the bundle, reject aliased KeyPackage entries, wire-size and
+/// deserialize the Welcome, gate the ciphersuite (INV-MLS-002 foreign-ingest), confirm the Welcome
+/// actually targets a KeyPackage this bundle holds, and build the expected hub entry. It does NOT run
+/// OpenMLS and does NOT open the Welcome, so the KeyPackage's private init key is never used here.
+///
+/// On success it returns a [`PreparedWelcome`] whose [`PreparedWelcome::retired_bundle`] the caller MUST
+/// persist durably (in place of its input bundle) BEFORE calling [`complete_welcome`]. That persist is
+/// the single-use transaction boundary: because it lands before the KeyPackage is ever used to open a
+/// Welcome, a crash/OOM/abort during [`complete_welcome`] cannot leave the KeyPackage both durably-live
+/// and replayable (on restart the durable bundle already reflects the retirement). This closes the
+/// crash-atomicity gap that `catch_unwind` alone cannot close.
+///
+/// The retirement is the fail-closed `conservative_retirement`: it retires every KeyPackage the bundle
+/// holds, so it can only over-retire, never leave a spent KeyPackage live. [`complete_welcome`] refines
+/// it to the precise retirement on a successful join (restoring KeyPackages not actually consumed,
+/// including a last-resort package).
+///
+/// Hub-identity pinning: `expected_hub_signature_key_bytes`/`expected_hub_credential_identity`, when
+/// non-empty, pin the hub the caller configured for this room (checked in [`complete_welcome`] against
+/// the joined group's single `ExternalSendersExtension` entry). Empty = a hub-less group (the current
+/// `mimi_create_group` production path), pinning nothing.
+pub fn prepare_welcome_retirement(
     mls_welcome_message_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     expected_hub_signature_key_bytes: Vec<u8>,
     expected_hub_credential_identity: String,
-) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
-    // Wrap the owned bundle input on entry (see crate::mls::groups::
-    // process_welcome's comment). mls_welcome_message_bytes is an MLS Welcome (HPKE-sealed
-    // wire form) and expected_hub_signature_key_bytes is the hub's PUBLIC key - neither is
-    // the plaintext key bundle.
+) -> Result<PreparedWelcome, MimiWelcomeError> {
+    // Wrap the owned bundle input on entry (see crate::mls::groups::process_welcome's comment).
+    // mls_welcome_message_bytes is an MLS Welcome (HPKE-sealed wire form) and
+    // expected_hub_signature_key_bytes is the hub's PUBLIC key - neither is the plaintext key bundle.
     let bundle_bytes = Zeroizing::new(bundle_bytes);
     let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
+    // A provider is needed ONLY for reject_aliased_kp_entries' KeyPackage-hash check; no storage is
+    // loaded into it and no join runs here, so nothing is spent in phase 1.
     let provider = OpenMlsRustCrypto::default();
-    // Snapshot the caller's KeyPackage storage and reject aliased entries before the join, the same way
-    // the non-appsync path does: an alias K_A -> serialized_bundle(B) beside the genuine K_B -> B would
-    // let a spent KeyPackage replay a later Welcome. The snapshot is diffed against post-join storage to
-    // retire the KeyPackage this join consumes.
+    // Snapshot the caller's KeyPackage storage and reject aliased entries: an alias K_A ->
+    // serialized_bundle(B) beside the genuine K_B -> B would let a spent KeyPackage replay a later
+    // Welcome. Carried into complete_welcome to seed the ephemeral provider and diff the retirement.
     let original_storage = crate::mls::groups::reject_aliased_kp_entries(
         mem::take(&mut identity.storage_map),
         &provider,
     );
-    {
-        let mut values = provider.storage().values.write().unwrap();
-        *values = original_storage.iter().cloned().collect();
-    }
 
-    crate::mls::check_wire_size(&mls_welcome_message_bytes, "mimi_process_welcome Welcome")?;
+    crate::mls::check_wire_size(
+        &mls_welcome_message_bytes,
+        "prepare_welcome_retirement Welcome",
+    )?;
     let mls_message = MlsMessageIn::tls_deserialize_exact(mls_welcome_message_bytes.as_slice())
         .map_err(|e| anyhow::anyhow!("Invalid MlsMessage: {:?}", e))?;
     let welcome = match mls_message.extract() {
@@ -861,13 +953,28 @@ pub fn mimi_process_welcome(
         _ => return Err(anyhow::anyhow!("Message is not a Welcome").into()),
     };
 
-    // INV-MLS-002 explicit accept-gate (MIMI foreign-ingest): refuse a foreign-suite Welcome before
-    // StagedWelcome - a MIMI provider takes objects whose suite the REMOTE chooses, so this gate is
+    // INV-MLS-002 explicit accept-gate (MIMI foreign-ingest): refuse a foreign-suite Welcome before it
+    // is ever opened - a MIMI provider takes objects whose suite the REMOTE chooses, so this gate is
     // mandatory here (the native emergent protections do not apply).
     crate::suite_policy::gate_inbound_welcome(&welcome)?;
 
-    // Build the expected hub entry BEFORE the join, so a malformed expectation fails while the
-    // KeyPackage is still unspent (a Failed, nothing to retire). An empty expected key is a hub-less
+    // Does this Welcome target a KeyPackage the caller actually holds? If not, there is nothing to
+    // spend and nothing to retire (Unspent) - a non-targeting or hostile Welcome MUST NOT be able to
+    // force-retire the caller's KeyPackages. The lookup uses only PUBLIC storage-key hashing, never a
+    // private init key, so identifying the target does not itself consume it.
+    let target_keys = welcome_target_storage_keys(&welcome)?;
+    let targets_caller_kp = target_keys
+        .iter()
+        .any(|tk| original_storage.iter().any(|(k, _)| k == tk));
+    if !targets_caller_kp {
+        return Err(anyhow::anyhow!(
+            "the Welcome does not target any KeyPackage this bundle holds"
+        )
+        .into());
+    }
+
+    // Build the expected hub entry BEFORE returning, so a malformed expectation fails while the
+    // KeyPackage is still unspent (Unspent, nothing to retire). An empty expected key is a hub-less
     // group and pins nothing. `ExternalSender`'s fields are pub(crate) in openmls, so the pin compares
     // TLS-serialized bytes - byte-identical serialization IS structural equality for this type, built
     // the exact way `mimi_create_group_with_external_senders` builds the real one.
@@ -886,25 +993,83 @@ pub fn mimi_process_welcome(
         )
     };
 
-    let mls_group_config = MlsGroupJoinConfig::builder()
-        // Same MIXED_PLAINTEXT rationale as mimi_create_group above: a member who JOINS a mimi-lane
-        // group must keep sending hub-readable (PublicMessage) handshake messages too, not just the
-        // creator. Otherwise the group's hub-readability guarantee holds only until the first
-        // non-creator member commits.
-        .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
-        .build();
-    // A fail-closed retirement to fall back on if the join spends the KeyPackage but the precise
-    // post-join retirement cannot be built (a caught post-deletion panic, or the retirement itself
-    // erroring). Serialized BEFORE the spend, so no post-spend fallible step can lose the artifact.
+    // THE FAIL-CLOSED RETIREMENT, built with NO join and NO spend. Persisting THIS durably before
+    // calling complete_welcome is what makes single-use crash-atomic (see the function doc).
     let conservative = crate::mls::groups::conservative_retirement(&identity, &original_storage)?;
 
-    // THE SPEND BOUNDARY. OpenMLS deletes the (non-last-resort) KeyPackage from provider storage at the
-    // very start of new_from_welcome, before it finishes decrypting/validating the Welcome - so BOTH
-    // new_from_welcome and into_group can fail (corrupted group secrets, a missing embedded ratchet
-    // tree, a confirmation-tag mismatch, an into_group error) AFTER the KeyPackage is already spent. A
-    // confirmation-tag mismatch is a debug-build panic (openmls `debug_assert!`) that becomes a plain
-    // Err in release; catch_unwind so even that path can still return the retirement. None: the ratchet
-    // tree is embedded in the Welcome (use_ratchet_tree_extension).
+    Ok(PreparedWelcome {
+        retired_bundle: conservative.to_vec(),
+        identity: Some(identity),
+        original_storage,
+        welcome: Some(welcome),
+        expected_hub_entry,
+    })
+}
+
+/// PHASE 2 of the crash-atomic AppSync Welcome join: open the Welcome on an EPHEMERAL copy of the
+/// KeyPackage material and return the joined group.
+///
+/// MUST be called only after the caller has durably persisted [`PreparedWelcome::retired_bundle`] from
+/// phase 1. Returns `(new_group_state, updated_bundle)` - the same shape as
+/// [`crate::mls::groups::process_welcome`] - where `updated_bundle` is the PRECISE retirement (RFC 9420
+/// §16.8): it retires exactly the consumed KeyPackage and keeps a last-resort package or any KeyPackage
+/// the join did not consume, refining the over-retiring conservative bundle the caller already persisted.
+/// The caller SHOULD persist `updated_bundle` in place of the conservative one.
+///
+/// The spend runs against a fresh provider seeded from a COPY of the phase-1 material; nothing here
+/// mutates anything the caller durably owns. So a crash/OOM/abort in the open - the window `catch_unwind`
+/// cannot cover, since a retirement built only after the spend would be lost - cannot
+/// leave the KeyPackage durably-live and replayable: the caller's durable state already reflects the
+/// phase-1 retirement. `catch_unwind` is retained as defense-in-depth (a debug confirmation-tag
+/// `debug_assert!` panic must not unwind past the crypto boundary) but is no longer the transaction
+/// boundary.
+///
+/// Because the retirement is already durable, every outcome here keeps it: a join that does not
+/// complete - a hub-pin rejection or any post-open error - is a [`MimiWelcomeError::Spent`] carrying
+/// the best retirement obtainable (precise when it can be built, else the conservative the caller
+/// already holds); there is no `Unspent` outcome in phase 2.
+#[allow(clippy::too_many_lines)]
+pub fn complete_welcome(
+    mut prepared: PreparedWelcome,
+) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
+    // Move the ephemeral material out of the Drop type via `.take()`/`mem::take` (Rust forbids moving
+    // fields out of a Drop type). The husk left behind holds only empty/None, so its Drop wipes nothing.
+    let identity = prepared
+        .identity
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("PreparedWelcome has already been completed"))?;
+    let welcome = prepared
+        .welcome
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("PreparedWelcome has already been completed"))?;
+    let original_storage = mem::take(&mut prepared.original_storage);
+    let expected_hub_entry = prepared.expected_hub_entry.take();
+    // The conservative retirement the caller already persisted; the fail-closed fallback if the precise
+    // retirement cannot be built. Zeroizing so this in-process copy wipes on return.
+    let conservative = Zeroizing::new(mem::take(&mut prepared.retired_bundle));
+
+    // EPHEMERAL provider, seeded from a COPY of the caller's material. The caller's durable store
+    // already reflects the phase-1 retirement and is never touched here, so the spend below is
+    // crash-atomic by construction.
+    let provider = OpenMlsRustCrypto::default();
+    {
+        let mut values = provider.storage().values.write().unwrap();
+        *values = original_storage.iter().cloned().collect();
+    }
+
+    let mls_group_config = MlsGroupJoinConfig::builder()
+        // Same MIXED_PLAINTEXT rationale as mimi_create_group: a member who JOINS a mimi-lane group
+        // must keep sending hub-readable (PublicMessage) handshake messages too, or the group's
+        // hub-readability guarantee holds only until the first non-creator member commits.
+        .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .build();
+
+    // THE SPEND, on the ephemeral provider. OpenMLS deletes the (non-last-resort) KeyPackage at the
+    // very start of new_from_welcome, before it finishes decrypting/validating - so BOTH new_from_welcome
+    // and into_group can fail after the (ephemeral) KeyPackage is spent. A confirmation-tag mismatch is
+    // a debug-build panic (openmls `debug_assert!`) that becomes a plain Err in release; catch_unwind
+    // stays as defense-in-depth (no longer the transaction boundary). None: the ratchet tree is embedded
+    // in the Welcome (use_ratchet_tree_extension).
     let join: anyhow::Result<MlsGroup> =
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let staged =
@@ -920,51 +1085,47 @@ pub fn mimi_process_welcome(
 
     // Read provider storage AFTER the boundary, regardless of Ok/Err/panic. This is the ONE read that
     // cannot rely on the module's "lock never poisons" invariant - a caught panic could have poisoned
-    // the guard mid-write - so it alone is poison-tolerant rather than `.unwrap()`.
-    let post_join_storage: Vec<(Vec<u8>, Vec<u8>)> = {
+    // the guard mid-write - so it alone is poison-tolerant rather than `.unwrap()`. Wrapped so its
+    // secret values wipe on every early return.
+    let mut post_join_storage = PostJoinStorage({
         let values = provider
             .storage()
             .values
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         values.clone().into_iter().collect()
-    };
-    // The KeyPackage is spent iff one of the caller's original storage keys no longer survives.
-    let spent = original_storage
-        .iter()
-        .any(|(k, _)| !post_join_storage.iter().any(|(pk, _)| pk == k));
+    });
 
     let group = match join {
         Ok(group) => group,
         Err(e) => {
-            // A failure before the spend leaves the KeyPackage live (Unspent, nothing to retire); a
-            // failure after it must still hand back the retirement (Spent) or the KeyPackage replays.
-            if spent {
-                let retired_bundle = crate::mls::groups::retire_consumed_key_package(
-                    identity,
-                    original_storage,
-                    &post_join_storage,
-                    &provider,
-                )
-                .map(|z| z.to_vec())
-                .unwrap_or_else(|_| conservative.to_vec());
-                return Err(MimiWelcomeError::Spent {
-                    retired_bundle,
-                    reason: format!("the join failed after the KeyPackage was spent: {e}"),
-                });
-            }
-            return Err(MimiWelcomeError::Unspent(e));
+            // The caller already durably persisted the fail-closed retirement in phase 1, so the
+            // retirement stands regardless - there is no Unspent outcome here. Refine to the precise
+            // retirement when it can be built (restoring KeyPackages the conservative over-retired,
+            // including a last-resort package that was not actually consumed); otherwise the caller
+            // keeps the conservative bundle it already holds.
+            let retired_bundle = crate::mls::groups::retire_consumed_key_package(
+                identity,
+                original_storage,
+                &post_join_storage.0,
+                &provider,
+            )
+            .map(|z| z.to_vec())
+            .unwrap_or_else(|_| conservative.to_vec());
+            return Err(MimiWelcomeError::Spent {
+                retired_bundle,
+                reason: format!("the join did not complete after the Welcome was opened: {e}"),
+            });
         }
     };
 
-    // The KeyPackage is now spent, so retire it from the caller's bundle. Shared with the non-appsync
-    // path so the single-use retirement is one implementation. If building the precise retirement fails,
-    // the KeyPackage is still spent - fail closed to the conservative retirement as a Spent and discard
-    // the join, rather than map the error to Unspent (which would drop the retirement of a spent KP).
+    // Join succeeded: build the precise retirement (honors the last-resort exception, retires exactly
+    // the consumed KeyPackage). Shared with the non-appsync path so the single-use retirement is one
+    // implementation. Fail closed to the conservative the caller already persisted.
     let retired_bundle = match crate::mls::groups::retire_consumed_key_package(
         identity,
         original_storage,
-        &post_join_storage,
+        &post_join_storage.0,
         &provider,
     ) {
         Ok(bundle) => bundle.to_vec(),
@@ -979,8 +1140,8 @@ pub fn mimi_process_welcome(
     };
 
     // Pin the configured hub credential BEFORE serializing the joined state, so a rejection never builds
-    // (and then drops unwiped) a GroupState buffer. The KeyPackage is already spent, so the retirement
-    // travels with the rejection as a Spent for the caller to persist.
+    // (and then drops unwiped) a GroupState buffer. The retirement is already durable, so a rejection
+    // travels back as a Spent for the caller to persist over the conservative one.
     if let Some(expected_bytes) = expected_hub_entry {
         let matches = match group.extensions().external_senders() {
             Some(list) if list.len() == 1 => list[0]
@@ -999,11 +1160,12 @@ pub fn mimi_process_welcome(
         }
     }
 
-    // The KeyPackage is spent and retired; if the joined state cannot be serialized, still hand back the
-    // retirement (Spent) so the caller persists it, rather than drop it by mapping to Unspent.
+    // Move the joined-group storage into GroupState (mem::take leaves the wrapper empty; GroupState's
+    // own Drop then owns the wipe). If it cannot be serialized, still hand back the retirement (Spent).
+    let group_id = group.group_id().to_vec();
     let state_bytes = match crate::mls::zeroizing_json(&GroupState {
-        group_id: group.group_id().to_vec(),
-        storage_map: post_join_storage,
+        group_id,
+        storage_map: mem::take(&mut post_join_storage.0),
     }) {
         Ok(state) => state,
         Err(_) => {
@@ -1016,6 +1178,39 @@ pub fn mimi_process_welcome(
     };
 
     Ok((state_bytes.to_vec(), retired_bundle))
+}
+
+/// Process an AppSync-lane Welcome to join a group, in a single call.
+///
+/// Returns `(new_group_state, updated_bundle)`, the same shape as the non-appsync
+/// [`crate::mls::groups::process_welcome`]. The updated bundle is the caller's bundle with the
+/// KeyPackage this join consumed retired (single-use, RFC 9420 §16.8); the caller MUST persist the
+/// returned bundle in place of the input.
+///
+/// 🔴 This convenience form is NOT crash-atomic. It runs [`prepare_welcome_retirement`] then
+/// [`complete_welcome`] with NO durable persist point between them, so a crash/OOM/abort during the open
+/// can lose the retirement while the caller's durable bundle still holds the live KeyPackage - the
+/// crash window the two-phase API closes. Any caller that requires the crash-atomic single-use guarantee (the
+/// production join path) MUST use the two-phase [`prepare_welcome_retirement`] + [`complete_welcome`]
+/// API and persist [`PreparedWelcome::retired_bundle`] between the two calls. This wrapper is retained
+/// for the not-yet-atomic FRB/demo callers and for tests.
+///
+/// Hub-identity pinning is as documented on [`prepare_welcome_retirement`]. A failure before the
+/// KeyPackage is targeted/opened is [`MimiWelcomeError::Unspent`]; a failure after the Welcome is opened
+/// is [`MimiWelcomeError::Spent`] carrying the retirement.
+pub fn mimi_process_welcome(
+    mls_welcome_message_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    expected_hub_signature_key_bytes: Vec<u8>,
+    expected_hub_credential_identity: String,
+) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
+    let prepared = prepare_welcome_retirement(
+        mls_welcome_message_bytes,
+        bundle_bytes,
+        expected_hub_signature_key_bytes,
+        expected_hub_credential_identity,
+    )?;
+    complete_welcome(prepared)
 }
 
 #[cfg(test)]

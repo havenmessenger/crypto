@@ -944,3 +944,212 @@ fn a_post_spend_welcome_failure_retires_the_keypackage() {
          post-spend error path"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Two-phase persist-before-spend Welcome: crash-atomic single-use (RFC 9420 §16.8).
+// Each of these asserts a property a single-call join cannot provide: a single call builds the
+// retirement only AFTER opening the Welcome, so obtaining a replay-blocking retirement requires using
+// the KeyPackage - which IS the crash window. The two-phase API decouples the two.
+// ---------------------------------------------------------------------------
+
+/// The crash-atomicity crux. Run ONLY phase 1, then DROP the `PreparedWelcome` without ever calling
+/// `complete_welcome` - a crash between the caller's persist and phase 2. The retirement the caller
+/// persisted in phase 1 - built before the KeyPackage's private init key was ever used to open a
+/// Welcome - must already block a replay of the same KeyPackage. A single-call join cannot express this:
+/// there, a replay-blocking retirement only exists after the open. Mutation guard: a phase 1 that
+/// returns the input bundle unretired lets `welcome2` open, reddening the final assert.
+#[test]
+fn prepared_retirement_blocks_replay_before_any_welcome_is_opened() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@r4.test".to_string(), now).expect("alice");
+    let (_b, bob_kp, bob) = mimi_generate_identity("bob@r4.test".to_string(), now).expect("bob");
+    let roster = vec![0x81, 0x81, 0x00];
+
+    // Two groups adding the SAME bob KeyPackage: welcome1 drives phase 1, welcome2 is the replay attempt.
+    let g1 = mimi_create_group("r4-g1".to_string(), alice.clone()).expect("g1");
+    let (_g1, welcome1, _c1) =
+        mimi_add_member_commit_appsync(g1, alice.clone(), bob_kp.clone(), roster.clone())
+            .expect("add bob to g1");
+    let g2 = mimi_create_group("r4-g2".to_string(), alice.clone()).expect("g2");
+    let (_g2, welcome2, _c2) =
+        mimi_add_member_commit_appsync(g2, alice, bob_kp, roster).expect("add bob to g2");
+
+    // PHASE 1 ONLY. No Welcome is ever opened; the KeyPackage's private init key is never used.
+    let prepared = prepare_welcome_retirement(welcome1, bob, Vec::new(), String::new())
+        .expect("phase 1 prepares a retirement for a targeting Welcome");
+    let retired = prepared.retired_bundle().to_vec();
+
+    // The caller persists `retired`, then the process dies before complete_welcome ever runs.
+    drop(prepared);
+
+    // The persisted retirement already cleared the consumed KeyPackage's private bundle...
+    let parsed: crate::mls::IdentityBundle =
+        serde_json::from_slice(&retired).expect("deserialize retired bundle");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "phase 1 must retire the KeyPackage's private bundle before any Welcome is opened"
+    );
+
+    // ...and a second Welcome for the same KeyPackage cannot open against it: the retirement is durable
+    // BEFORE the spend, so an abort cannot leave a live-and-replayable KeyPackage behind.
+    let second = mimi_process_welcome(welcome2, retired, Vec::new(), String::new());
+    assert!(
+        second.is_err(),
+        "a retirement persisted in phase 1 (before any open) failed to block replay - the \
+         crash-atomicity window is still open"
+    );
+}
+
+/// A non-targeting or hostile Welcome must not be able to force-retire the caller's KeyPackages (a
+/// KeyPackage-nuke DoS). `prepare_welcome_retirement` returns `Unspent` for a Welcome that targets a
+/// DIFFERENT identity's KeyPackage, leaving the caller's bundle intact. Mutation guard: dropping the
+/// "does this Welcome target one of my KeyPackages?" gate makes phase 1 build a conservative retirement
+/// and return `Ok`, reddening the `Ok(_) => panic!` arm.
+#[test]
+fn prepare_welcome_retirement_returns_unspent_for_a_non_targeting_welcome() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@nt.test".to_string(), now).expect("alice");
+    let (_b, bob_kp, bob) = mimi_generate_identity("bob@nt.test".to_string(), now).expect("bob");
+    let (_c, carol_kp, _carol) =
+        mimi_generate_identity("carol@nt.test".to_string(), now).expect("carol");
+
+    // A Welcome that targets CAROL's KeyPackage, not bob's.
+    let gc = mimi_create_group("nt-carol".to_string(), alice.clone()).expect("gc");
+    let (_gc, welcome_for_carol) = mimi_add_member(gc, alice.clone(), carol_kp).expect("add carol");
+
+    // bob prepares against a Welcome that targets no KeyPackage he holds -> Unspent, no retirement.
+    match prepare_welcome_retirement(welcome_for_carol, bob.clone(), Vec::new(), String::new()) {
+        Err(MimiWelcomeError::Unspent(_)) => {}
+        Err(MimiWelcomeError::Spent { .. }) => {
+            panic!("a non-targeting Welcome must be Unspent, not force-retire bob's KeyPackages")
+        }
+        Ok(_) => panic!("a non-targeting Welcome must not yield a retirement for bob"),
+    }
+
+    // bob's KeyPackage is intact: a genuine Welcome for bob still opens against his untouched bundle.
+    let gb = mimi_create_group("nt-bob".to_string(), alice.clone()).expect("gb");
+    let (_gb, welcome_for_bob) = mimi_add_member(gb, alice, bob_kp).expect("add bob");
+    mimi_process_welcome(welcome_for_bob, bob, Vec::new(), String::new())
+        .expect("bob's own KeyPackage must still open a genuine Welcome (it was never retired)");
+}
+
+/// Positive control for the two-phase path: prepare, (the caller persists), then complete opens the
+/// Welcome on the ephemeral copy and returns a usable group state PLUS the precise retirement, which is
+/// single-use. Proves phase 2 actually joins and the normal KeyPackage is retired exactly once.
+/// Mutation guard: a complete that returns the input bundle unretired lets `welcome2` open, reddening
+/// the replay assert.
+#[test]
+fn two_phase_prepare_then_complete_joins_and_retires_the_keypackage() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@2p.test".to_string(), now).expect("alice");
+    let (_b, bob_kp, bob) = mimi_generate_identity("bob@2p.test".to_string(), now).expect("bob");
+    let roster = vec![0x81, 0x81, 0x00];
+
+    let g1 = mimi_create_group("2p-g1".to_string(), alice.clone()).expect("g1");
+    let (_g1, welcome1, _c1) =
+        mimi_add_member_commit_appsync(g1, alice.clone(), bob_kp.clone(), roster.clone())
+            .expect("add bob to g1");
+    let g2 = mimi_create_group("2p-g2".to_string(), alice.clone()).expect("g2");
+    let (_g2, welcome2, _c2) =
+        mimi_add_member_commit_appsync(g2, alice, bob_kp, roster).expect("add bob to g2");
+
+    let prepared = prepare_welcome_retirement(welcome1, bob, Vec::new(), String::new())
+        .expect("phase 1 prepares");
+    // (the caller persists prepared.retired_bundle() here before completing)
+    let (state, retired) = complete_welcome(prepared).expect("phase 2 joins");
+    assert!(
+        !state.is_empty(),
+        "phase 2 must return a joined group state"
+    );
+
+    let parsed: crate::mls::IdentityBundle =
+        serde_json::from_slice(&retired).expect("deserialize precise retirement");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "a successful two-phase join must retire the consumed KeyPackage's private bundle"
+    );
+
+    let second = mimi_process_welcome(welcome2, retired, Vec::new(), String::new());
+    assert!(
+        second.is_err(),
+        "the two-phase precise retirement failed to block replay - single-use hole"
+    );
+}
+
+/// A phase-2 hub-pin rejection returns `Spent`, and because the caller persisted the fail-closed
+/// retirement in phase 1, a replay is blocked regardless. Proves there is no `Unspent` escape once
+/// phase 1 has committed: BOTH the phase-1 retirement (already persisted) and the phase-2-returned
+/// retirement block replay. Mutation guard: routing the hub rejection to `Unspent` reddens the `Spent`
+/// match; dropping the retirement reddens a replay assert.
+#[test]
+fn two_phase_hub_pin_rejection_keeps_the_retirement_durable() {
+    let now = now_secs();
+    let (_aid, _akp, alice) =
+        crate::identity::generate_identity("alice@2pr.test".to_string(), now).expect("alice");
+    let (_bid, bob_kp, bob) =
+        crate::identity::generate_identity("bob@2pr.test".to_string(), now).expect("bob");
+    let (_hid, _hkp, real_hub) =
+        crate::identity::generate_identity("hub@2pr.test".to_string(), now).expect("hub");
+    let (_wid, _wkp, wrong_hub) =
+        crate::identity::generate_identity("attacker@2pr.test".to_string(), now)
+            .expect("wrong hub");
+    let (_rs, real_hub_pubkey) = raw_signer_and_pubkey(&real_hub);
+    let (_ws, wrong_hub_pubkey) = raw_signer_and_pubkey(&wrong_hub);
+
+    // g1 names the real hub; g2 is where the same KeyPackage would be replayed.
+    let g1 = mimi_create_group_with_external_senders(
+        "2pr-g1".to_string(),
+        alice.clone(),
+        real_hub_pubkey.as_slice().to_vec(),
+        "hub@2pr.test".to_string(),
+    )
+    .expect("create g1 with hub");
+    let (_g1, welcome1) =
+        mimi_add_member(g1, alice.clone(), bob_kp.clone()).expect("add bob to g1");
+    let g2 = mimi_create_group("2pr-g2".to_string(), alice.clone()).expect("create g2");
+    let (_g2, welcome2) = mimi_add_member(g2, alice, bob_kp).expect("add bob to g2");
+
+    // Phase 1 prepares the retirement (the caller persists it); phase 2 opens but the WRONG-hub pin
+    // rejects the join after the KeyPackage is spent on the ephemeral copy.
+    let prepared = prepare_welcome_retirement(
+        welcome1,
+        bob,
+        wrong_hub_pubkey.as_slice().to_vec(),
+        "hub@2pr.test".to_string(),
+    )
+    .expect("phase 1 prepares");
+    let phase1_retirement = prepared.retired_bundle().to_vec();
+
+    let retired = match complete_welcome(prepared) {
+        Err(MimiWelcomeError::Spent { retired_bundle, .. }) => retired_bundle,
+        Err(MimiWelcomeError::Unspent(e)) => {
+            panic!("a post-open hub rejection must be Spent, not Unspent: {e}")
+        }
+        Ok(_) => panic!("a wrong-hub pin must reject the join"),
+    };
+    let parsed: crate::mls::IdentityBundle =
+        serde_json::from_slice(&retired).expect("deserialize retirement");
+    assert!(
+        parsed.key_package_bundle.is_none(),
+        "a rejected phase-2 join must still retire the consumed KeyPackage's private bundle"
+    );
+
+    // Both the phase-1 retirement AND the phase-2-returned retirement block replay of the KeyPackage.
+    assert!(
+        mimi_process_welcome(
+            welcome2.clone(),
+            phase1_retirement,
+            Vec::new(),
+            String::new()
+        )
+        .is_err(),
+        "the phase-1 retirement (already persisted) must block replay even though phase 2 rejected"
+    );
+    assert!(
+        mimi_process_welcome(welcome2, retired, Vec::new(), String::new()).is_err(),
+        "the phase-2 retirement must block replay after a hub rejection"
+    );
+}
