@@ -37,6 +37,7 @@ use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::OpenMlsProvider;
+use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::mem;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
@@ -894,6 +895,45 @@ fn welcome_target_storage_keys(welcome: &Welcome) -> anyhow::Result<Vec<Vec<u8>>
         .collect()
 }
 
+/// Build a fail-closed retirement for the KeyPackages publicly referenced by a Welcome.
+///
+/// The candidate set is sufficient before opening the Welcome: every non-last-resort KeyPackage
+/// OpenMLS can spend is named by one of these storage keys. If this calculation fails, callers must
+/// use the broader conservative retirement instead.
+fn candidate_retirement(
+    identity: &IdentityBundle,
+    original_storage: &[(Vec<u8>, Vec<u8>)],
+    candidates: &HashSet<Vec<u8>>,
+    provider: &impl OpenMlsProvider,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    if candidates.is_empty() {
+        anyhow::bail!("Welcome did not identify a KeyPackage candidate");
+    }
+
+    let field_is_candidate = identity
+        .key_package_bundle
+        .as_ref()
+        .map(|kpb| crate::mls::groups::kp_storage_key(kpb.key_package(), provider))
+        .transpose()?
+        .is_some_and(|key| candidates.contains(&key));
+    let kept = original_storage
+        .iter()
+        .filter(|(key, _)| !candidates.contains(key))
+        .cloned()
+        .collect();
+    let retired = IdentityBundle {
+        key_package_bundle: (!field_is_candidate)
+            .then(|| identity.key_package_bundle.clone())
+            .flatten(),
+        private_key: identity.private_key.clone(),
+        signature_scheme: identity.signature_scheme,
+        public_key_bytes: identity.public_key_bytes.clone(),
+        user_id: identity.user_id.clone(),
+        storage_map: kept,
+    };
+    crate::mls::zeroizing_json(&retired)
+}
+
 /// PHASE 1 of the crash-atomic AppSync Welcome join: build the fail-closed retirement WITHOUT spending
 /// the KeyPackage.
 ///
@@ -910,10 +950,11 @@ fn welcome_target_storage_keys(welcome: &Welcome) -> anyhow::Result<Vec<Vec<u8>>
 /// and replayable (on restart the durable bundle already reflects the retirement). This closes the
 /// crash-atomicity gap that `catch_unwind` alone cannot close.
 ///
-/// The retirement is the fail-closed `conservative_retirement`: it retires every KeyPackage the bundle
-/// holds, so it can only over-retire, never leave a spent KeyPackage live. [`complete_welcome`] refines
-/// it to the precise retirement on a successful join (restoring KeyPackages not actually consumed,
-/// including a last-resort package).
+/// The retirement removes the public-reference KeyPackage candidates from the bundle. If those
+/// candidates cannot be determined, it falls back to the fail-closed `conservative_retirement`, which
+/// retires every KeyPackage rather than risking a spent KeyPackage remaining live. [`complete_welcome`]
+/// refines it to the precise retirement on a successful join (restoring KeyPackages not actually
+/// consumed, including a last-resort package).
 ///
 /// Hub-identity pinning: `expected_hub_signature_key_bytes`/`expected_hub_credential_identity`, when
 /// non-empty, pin the hub the caller configured for this room (checked in [`complete_welcome`] against
@@ -963,10 +1004,11 @@ pub fn prepare_welcome_retirement(
     // force-retire the caller's KeyPackages. The lookup uses only PUBLIC storage-key hashing, never a
     // private init key, so identifying the target does not itself consume it.
     let target_keys = welcome_target_storage_keys(&welcome)?;
-    let targets_caller_kp = target_keys
-        .iter()
-        .any(|tk| original_storage.iter().any(|(k, _)| k == tk));
-    if !targets_caller_kp {
+    let candidates: HashSet<Vec<u8>> = target_keys
+        .into_iter()
+        .filter(|target| original_storage.iter().any(|(key, _)| key == target))
+        .collect();
+    if candidates.is_empty() {
         return Err(anyhow::anyhow!(
             "the Welcome does not target any KeyPackage this bundle holds"
         )
@@ -993,9 +1035,12 @@ pub fn prepare_welcome_retirement(
         )
     };
 
-    // THE FAIL-CLOSED RETIREMENT, built with NO join and NO spend. Persisting THIS durably before
-    // calling complete_welcome is what makes single-use crash-atomic (see the function doc).
-    let conservative = crate::mls::groups::conservative_retirement(&identity, &original_storage)?;
+    // Built with NO join and NO spend. If a candidate-specific retirement cannot be made, retain the
+    // broader fail-closed fallback rather than leaving a potentially spent KeyPackage live.
+    let conservative = candidate_retirement(&identity, &original_storage, &candidates, &provider)
+        .or_else(|_| {
+        crate::mls::groups::conservative_retirement(&identity, &original_storage)
+    })?;
 
     Ok(PreparedWelcome {
         retired_bundle: conservative.to_vec(),
@@ -1034,19 +1079,31 @@ pub fn complete_welcome(
 ) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
     // Move the ephemeral material out of the Drop type via `.take()`/`mem::take` (Rust forbids moving
     // fields out of a Drop type). The husk left behind holds only empty/None, so its Drop wipes nothing.
-    let identity = prepared
-        .identity
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("PreparedWelcome has already been completed"))?;
-    let welcome = prepared
-        .welcome
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("PreparedWelcome has already been completed"))?;
+    // Take this first so even defensive-invalid phase-2 states preserve the already-durable
+    // retirement rather than returning Unspent.
+    let conservative = Zeroizing::new(mem::take(&mut prepared.retired_bundle));
+    let identity = match prepared.identity.take() {
+        Some(identity) => identity,
+        None => {
+            return Err(MimiWelcomeError::Spent {
+                retired_bundle: conservative.to_vec(),
+                reason: "PreparedWelcome has already been completed".to_string(),
+            });
+        }
+    };
+    let welcome = match prepared.welcome.take() {
+        Some(welcome) => welcome,
+        None => {
+            return Err(MimiWelcomeError::Spent {
+                retired_bundle: conservative.to_vec(),
+                reason: "PreparedWelcome has already been completed".to_string(),
+            });
+        }
+    };
     let original_storage = mem::take(&mut prepared.original_storage);
     let expected_hub_entry = prepared.expected_hub_entry.take();
     // The conservative retirement the caller already persisted; the fail-closed fallback if the precise
     // retirement cannot be built. Zeroizing so this in-process copy wipes on return.
-    let conservative = Zeroizing::new(mem::take(&mut prepared.retired_bundle));
 
     // EPHEMERAL provider, seeded from a COPY of the caller's material. The caller's durable store
     // already reflects the phase-1 retirement and is never touched here, so the spend below is
@@ -1187,18 +1244,17 @@ pub fn complete_welcome(
 /// KeyPackage this join consumed retired (single-use, RFC 9420 §16.8); the caller MUST persist the
 /// returned bundle in place of the input.
 ///
-/// 🔴 This convenience form is NOT crash-atomic. It runs [`prepare_welcome_retirement`] then
-/// [`complete_welcome`] with NO durable persist point between them, so a crash/OOM/abort during the open
-/// can lose the retirement while the caller's durable bundle still holds the live KeyPackage - the
-/// crash window the two-phase API closes. Any caller that requires the crash-atomic single-use guarantee (the
-/// production join path) MUST use the two-phase [`prepare_welcome_retirement`] + [`complete_welcome`]
-/// API and persist [`PreparedWelcome::retired_bundle`] between the two calls. This wrapper is retained
-/// for the not-yet-atomic FRB/demo callers and for tests.
+/// This convenience form is non-atomic. Callers needing crash-atomic single-use handling must use
+/// [`prepare_welcome_retirement`], persist [`PreparedWelcome::retired_bundle`], then call
+/// [`complete_welcome`].
 ///
 /// Hub-identity pinning is as documented on [`prepare_welcome_retirement`]. A failure before the
 /// KeyPackage is targeted/opened is [`MimiWelcomeError::Unspent`]; a failure after the Welcome is opened
 /// is [`MimiWelcomeError::Spent`] carrying the retirement.
-pub fn mimi_process_welcome(
+#[deprecated(
+    note = "use prepare_welcome_retirement, persist PreparedWelcome::retired_bundle, then call complete_welcome"
+)]
+pub fn mimi_process_welcome_non_atomic(
     mls_welcome_message_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     expected_hub_signature_key_bytes: Vec<u8>,

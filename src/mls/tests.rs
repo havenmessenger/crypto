@@ -6,6 +6,8 @@
 //! cryptographic behavior (create/add/welcome/encrypt/decrypt/remove/regenerate all
 //! round-trip), which matters because this crate otherwise has no MLS-group-flow test coverage.
 
+#![allow(deprecated)] // compatibility API coverage remains until its external caller migrates
+
 use super::*;
 use crate::identity::generate_identity;
 use crate::mls::groups::{
@@ -567,7 +569,7 @@ fn add_member_rejects_oversize_key_package() {
 #[test]
 fn mimi_group_create_add_welcome_round_trips_after_zeroize_refactor() {
     use crate::mimi::{
-        mimi_add_member, mimi_create_group, mimi_generate_identity, mimi_process_welcome,
+        mimi_add_member, mimi_create_group, mimi_generate_identity, mimi_process_welcome_non_atomic,
     };
     let now = now_secs();
     let (_user_a, _kp_a_unused, bundle_a) =
@@ -581,8 +583,9 @@ fn mimi_group_create_add_welcome_round_trips_after_zeroize_refactor() {
     let (_group_state_a2, welcome) =
         mimi_add_member(group_state_a, bundle_a, kp_b).expect("mimi_add_member");
 
-    let (group_state_b, _) = mimi_process_welcome(welcome, bundle_b, Vec::new(), String::new())
-        .expect("mimi_process_welcome");
+    let (group_state_b, _) =
+        mimi_process_welcome_non_atomic(welcome, bundle_b, Vec::new(), String::new())
+            .expect("mimi_process_welcome_non_atomic");
     let state_b: GroupState = serde_json::from_slice(&group_state_b).expect("deserialize");
     assert_eq!(state_b.group_id, b"mimi-test-group");
 }
@@ -881,7 +884,7 @@ fn inbound_wire_deserializers_reject_hostile_bytes_without_panic() {
     }
 
     for (i, bytes) in hostile.iter().enumerate() {
-        let r = crate::mimi::mimi_process_welcome(
+        let r = crate::mimi::mimi_process_welcome_non_atomic(
             bytes.clone(),
             bundle.clone(),
             Vec::new(),
@@ -889,7 +892,7 @@ fn inbound_wire_deserializers_reject_hostile_bytes_without_panic() {
         );
         assert!(
             r.is_err(),
-            "mimi_process_welcome must reject hostile input #{i} with Err, not panic/Ok"
+            "mimi_process_welcome_non_atomic must reject hostile input #{i} with Err, not panic/Ok"
         );
     }
 }

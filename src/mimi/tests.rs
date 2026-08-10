@@ -3,6 +3,8 @@
 //! self-contained Welcome (ratchet tree embedded, no out-of-band export) a foreign MIMI
 //! implementation would byte-inspect.
 
+#![allow(deprecated)] // legacy API coverage remains until its external caller migrates
+
 use super::*;
 use crate::mls::groups::{decrypt_message, encrypt_message, mls_process_commit};
 
@@ -29,13 +31,14 @@ fn member_add_remove_commit_epoch_sync() {
 
     let alice_s = mimi_create_group("mls_group".to_string(), alice.clone()).expect("create_group");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
-        .expect("bob joins");
+    let (bob_s, _) =
+        mimi_process_welcome_non_atomic(welcome_bob, bob.clone(), Vec::new(), String::new())
+            .expect("bob joins");
 
     let (alice_s, welcome_carol, add_commit) =
         mimi_add_member_commit(alice_s, alice.clone(), carol_kp).expect("add carol");
     let (carol_s, _) =
-        mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
+        mimi_process_welcome_non_atomic(welcome_carol, carol.clone(), Vec::new(), String::new())
             .expect("carol joins");
     let (bob_s, _sender) =
         mls_process_commit(bob_s, bob.clone(), add_commit).expect("bob processes add");
@@ -82,15 +85,16 @@ fn member_add_remove_appsync_roster_round_trip() {
 
     let alice_s = mimi_create_group("as_group".to_string(), alice.clone()).expect("create_group");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
-        .expect("bob joins");
+    let (bob_s, _) =
+        mimi_process_welcome_non_atomic(welcome_bob, bob.clone(), Vec::new(), String::new())
+            .expect("bob joins");
 
     let roster_add = vec![0x81, 0x81, 0x00]; // opaque payload; surfacing correctness is what matters
     let (alice_s, welcome_carol, add_commit) =
         mimi_add_member_commit_appsync(alice_s, alice.clone(), carol_kp, roster_add.clone())
             .expect("add carol with roster");
     let (carol_s, _) =
-        mimi_process_welcome(welcome_carol, carol.clone(), Vec::new(), String::new())
+        mimi_process_welcome_non_atomic(welcome_carol, carol.clone(), Vec::new(), String::new())
             .expect("carol joins");
     let (bob_s, surfaced_add, _sender) =
         mls_process_commit_appsync(bob_s, bob.clone(), add_commit).expect("bob processes add");
@@ -135,7 +139,7 @@ fn member_add_remove_appsync_roster_round_trip() {
 
 /// The joiner receives ONLY the `MlsMessage(Welcome)` - no out-of-band ratchet tree - and must
 /// still join and exchange messages bidirectionally. Proves `use_ratchet_tree_extension(true)`
-/// embeds the tree and `mimi_process_welcome` reads it from the Welcome alone. This is the
+/// embeds the tree and `mimi_process_welcome_non_atomic` reads it from the Welcome alone. This is the
 /// conformant wire form a foreign MIMI implementation would byte-inspect.
 #[test]
 fn mimi_self_contained_welcome_round_trip() {
@@ -152,7 +156,7 @@ fn mimi_self_contained_welcome_round_trip() {
     let (snd_state_2, welcome_msg) =
         mimi_add_member(snd_state, snd_bundle.clone(), rcv_kp).expect("add receiver");
 
-    let (rcv_state, _) = mimi_process_welcome(
+    let (rcv_state, _) = mimi_process_welcome_non_atomic(
         welcome_msg.clone(),
         rcv_bundle.clone(),
         Vec::new(),
@@ -307,7 +311,12 @@ fn mimi_process_welcome_pins_correct_hub_succeeds() {
     .expect("create group with external_senders");
     let (_alice_s, welcome_bob) = mimi_add_member(alice_s, alice, bob_kp).expect("add bob");
 
-    let joined = mimi_process_welcome(welcome_bob, bob, hub_sig_bytes, "hub@pin.test".to_string());
+    let joined = mimi_process_welcome_non_atomic(
+        welcome_bob,
+        bob,
+        hub_sig_bytes,
+        "hub@pin.test".to_string(),
+    );
     assert!(
         joined.is_ok(),
         "join must succeed when the expected hub credential matches: {:?}",
@@ -344,7 +353,7 @@ fn mimi_process_welcome_rejects_wrong_hub_signature_key() {
     .expect("create group with external_senders");
     let (_alice_s, welcome_bob) = mimi_add_member(alice_s, alice, bob_kp).expect("add bob");
 
-    let joined = mimi_process_welcome(
+    let joined = mimi_process_welcome_non_atomic(
         welcome_bob,
         bob,
         wrong_hub_pubkey.as_slice().to_vec(),
@@ -379,7 +388,7 @@ fn mimi_process_welcome_rejects_wrong_hub_credential_identity() {
     .expect("create group with external_senders");
     let (_alice_s, welcome_bob) = mimi_add_member(alice_s, alice, bob_kp).expect("add bob");
 
-    let joined = mimi_process_welcome(
+    let joined = mimi_process_welcome_non_atomic(
         welcome_bob,
         bob,
         hub_pubkey.as_slice().to_vec(),
@@ -405,7 +414,7 @@ fn mimi_process_welcome_skips_pin_check_for_hubless_group() {
         mimi_create_group("nohub_group".to_string(), alice.clone()).expect("create plain group");
     let (_alice_s, welcome_bob) = mimi_add_member(alice_s, alice, bob_kp).expect("add bob");
 
-    let joined = mimi_process_welcome(welcome_bob, bob, Vec::new(), String::new());
+    let joined = mimi_process_welcome_non_atomic(welcome_bob, bob, Vec::new(), String::new());
     assert!(
         joined.is_ok(),
         "empty expected-hub bytes must skip the pin check for a hub-less group: {:?}",
@@ -530,8 +539,9 @@ fn mimi_accept_external_remove_proposal_does_not_leak_plaintext_on_wrong_message
 
     let alice_s = mimi_create_group("leak_group".to_string(), alice.clone()).expect("create");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
-        .expect("bob joins");
+    let (bob_s, _) =
+        mimi_process_welcome_non_atomic(welcome_bob, bob.clone(), Vec::new(), String::new())
+            .expect("bob joins");
 
     const SECRET_MARKER: &str = "SECRET-PLAINTEXT-MARKER-DO-NOT-LEAK";
     let (_bob_s, ct) =
@@ -755,8 +765,9 @@ fn appsync_commit_surfaces_the_committer_and_still_surfaces_the_roster() {
 
     let alice_s = mimi_create_group("as-snd-group".to_string(), alice.clone()).expect("create");
     let (alice_s, welcome_bob) = mimi_add_member(alice_s, alice.clone(), bob_kp).expect("add bob");
-    let (bob_s, _) = mimi_process_welcome(welcome_bob, bob.clone(), Vec::new(), String::new())
-        .expect("bob joins");
+    let (bob_s, _) =
+        mimi_process_welcome_non_atomic(welcome_bob, bob.clone(), Vec::new(), String::new())
+            .expect("bob joins");
 
     let roster = vec![0x81, 0x83, 0x02];
     let (_alice_s, _welcome_carol, add_commit) =
@@ -787,7 +798,7 @@ fn appsync_commit_surfaces_the_committer_and_still_surfaces_the_roster() {
 }
 
 /// RFC 9420 §16.8 single-use, on the AppSync Welcome path. A KeyPackage consumed by one AppSync
-/// Welcome must not open a second one. `mimi_process_welcome` returns the caller's bundle with the
+/// Welcome must not open a second one. `mimi_process_welcome_non_atomic` returns the caller's bundle with the
 /// consumed KeyPackage retired, the same way the non-appsync `process_welcome` does, so replaying that
 /// KeyPackage into a second Welcome is rejected. Without the retirement the second join would succeed
 /// and this test would fail.
@@ -811,8 +822,9 @@ fn an_appsync_consumed_keypackage_cannot_open_a_second_welcome() {
         mimi_add_member_commit_appsync(g2, alice, bob_kp, roster).expect("add bob to g2");
 
     // Bob joins group 1; the returned bundle has the consumed KeyPackage retired.
-    let (_state1, bob_after) = mimi_process_welcome(welcome1, bob, Vec::new(), String::new())
-        .expect("first Welcome joins");
+    let (_state1, bob_after) =
+        mimi_process_welcome_non_atomic(welcome1, bob, Vec::new(), String::new())
+            .expect("first Welcome joins");
 
     // The field copy of the consumed KeyPackage's private material must be cleared, not merely retired
     // from storage_map: the second copy in key_package_bundle is otherwise recoverable at rest.
@@ -824,7 +836,7 @@ fn an_appsync_consumed_keypackage_cannot_open_a_second_welcome() {
     );
 
     // The consumed KeyPackage must not open the second Welcome (single-use).
-    let second = mimi_process_welcome(welcome2, bob_after, Vec::new(), String::new());
+    let second = mimi_process_welcome_non_atomic(welcome2, bob_after, Vec::new(), String::new());
     assert!(
         second.is_err(),
         "a KeyPackage consumed by one AppSync Welcome opened a second one - RFC 9420 §16.8 single-use \
@@ -832,7 +844,7 @@ fn an_appsync_consumed_keypackage_cannot_open_a_second_welcome() {
     );
 }
 
-/// A join REJECTED by the hub-pin still spends the KeyPackage. `mimi_process_welcome` retires the
+/// A join REJECTED by the hub-pin still spends the KeyPackage. `mimi_process_welcome_non_atomic` retires the
 /// consumed KeyPackage before the hub-pin decision and returns `Rejected` carrying the retired bundle,
 /// so a second Welcome for that KeyPackage is refused. Without carrying the retirement on the error
 /// path, the caller would keep the spent KeyPackage and a second Welcome could reuse it.
@@ -865,7 +877,7 @@ fn an_appsync_welcome_retires_the_keypackage_even_when_the_hub_pin_rejects_the_j
     let (_g2, welcome2) = mimi_add_member(g2, alice, bob_kp).expect("add bob to g2");
 
     // Bob joins g1 but expects the WRONG hub: the join is rejected, and the KeyPackage is retired anyway.
-    let retired_bundle = match mimi_process_welcome(
+    let retired_bundle = match mimi_process_welcome_non_atomic(
         welcome1,
         bob,
         wrong_hub_pubkey.as_slice().to_vec(),
@@ -885,7 +897,8 @@ fn an_appsync_welcome_retires_the_keypackage_even_when_the_hub_pin_rejects_the_j
     );
 
     // The retired KeyPackage must not open the second Welcome.
-    let second = mimi_process_welcome(welcome2, retired_bundle, Vec::new(), String::new());
+    let second =
+        mimi_process_welcome_non_atomic(welcome2, retired_bundle, Vec::new(), String::new());
     assert!(
         second.is_err(),
         "a KeyPackage spent by a rejected join opened a second Welcome - single-use hole on the error \
@@ -922,7 +935,7 @@ fn a_post_spend_welcome_failure_retires_the_keypackage() {
     let last = corrupted.len() - 1;
     corrupted[last] ^= 0xff;
 
-    let retired_bundle = match mimi_process_welcome(corrupted, bob, Vec::new(), String::new()) {
+    let retired_bundle = match mimi_process_welcome_non_atomic(corrupted, bob, Vec::new(), String::new()) {
         Err(MimiWelcomeError::Spent { retired_bundle, .. }) => retired_bundle,
         Err(MimiWelcomeError::Unspent(e)) => panic!(
             "corruption landed BEFORE the spend (Unspent: {e}); this test needs a post-spend failure"
@@ -937,7 +950,8 @@ fn a_post_spend_welcome_failure_retires_the_keypackage() {
     );
 
     // The retired KeyPackage must not open the second, valid Welcome.
-    let second = mimi_process_welcome(welcome2, retired_bundle, Vec::new(), String::new());
+    let second =
+        mimi_process_welcome_non_atomic(welcome2, retired_bundle, Vec::new(), String::new());
     assert!(
         second.is_err(),
         "a KeyPackage spent by a failed join opened a second Welcome - single-use hole on the \
@@ -993,12 +1007,130 @@ fn prepared_retirement_blocks_replay_before_any_welcome_is_opened() {
 
     // ...and a second Welcome for the same KeyPackage cannot open against it: the retirement is durable
     // BEFORE the spend, so an abort cannot leave a live-and-replayable KeyPackage behind.
-    let second = mimi_process_welcome(welcome2, retired, Vec::new(), String::new());
+    let second = mimi_process_welcome_non_atomic(welcome2, retired, Vec::new(), String::new());
     assert!(
         second.is_err(),
         "a retirement persisted in phase 1 (before any open) failed to block replay - the \
          crash-atomicity window is still open"
     );
+}
+
+/// The renamed compatibility entry point remains callable while directing production callers to the
+/// two-phase API.
+#[test]
+fn non_atomic_welcome_processor_remains_callable() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@legacy.test".to_string(), now).expect("generate alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@legacy.test".to_string(), now).expect("generate bob");
+    let group = mimi_create_group("legacy-group".to_string(), alice.clone()).expect("create group");
+    let (_group, welcome) = mimi_add_member(group, alice.clone(), bob_kp).expect("add bob");
+
+    let (state, _) =
+        mimi_process_welcome_non_atomic(welcome, bob, Vec::new(), String::new()).expect("join");
+    assert!(
+        !state.is_empty(),
+        "the compatibility entry point must remain callable"
+    );
+}
+
+/// Phase 1 retires only the public-reference candidate KeyPackage. Other KeyPackages remain available
+/// when the caller persists this retirement before phase 2.
+#[test]
+fn prepared_retirement_keeps_unreferenced_keypackages() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@candidate.test".to_string(), now).expect("generate alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@candidate.test".to_string(), now).expect("generate bob");
+    let (_id, replacement_kp, replacement_bundle) =
+        crate::mls::groups::regenerate_key_package(bob.clone(), now)
+            .expect("regenerate bob keypackage");
+    let mut two_keypackage_bundle: crate::mls::IdentityBundle =
+        serde_json::from_slice(&bob).expect("deserialize bob bundle");
+    let replacement: crate::mls::IdentityBundle =
+        serde_json::from_slice(&replacement_bundle).expect("deserialize replacement bundle");
+    two_keypackage_bundle
+        .storage_map
+        .extend(replacement.storage_map.clone());
+    let two_keypackage_bundle =
+        serde_json::to_vec(&two_keypackage_bundle).expect("serialize two-keypackage bundle");
+
+    let group =
+        mimi_create_group("candidate-group".to_string(), alice.clone()).expect("create group");
+    let (_group, welcome) = mimi_add_member(group, alice.clone(), bob_kp).expect("add bob");
+    let replacement_group =
+        mimi_create_group("replacement-group".to_string(), alice.clone()).expect("create group");
+    let (_replacement_group, replacement_welcome) =
+        mimi_add_member(replacement_group, alice, replacement_kp)
+            .expect("add replacement keypackage");
+    let prepared =
+        prepare_welcome_retirement(welcome, two_keypackage_bundle, Vec::new(), String::new())
+            .expect("prepare candidate retirement");
+    let retired_bytes = prepared.retired_bundle().to_vec();
+    let retired: crate::mls::IdentityBundle =
+        serde_json::from_slice(prepared.retired_bundle()).expect("deserialize retirement");
+
+    let remaining_keypackages = retired
+        .storage_map
+        .iter()
+        .filter(|(key, _)| key.starts_with(b"KeyPackage"))
+        .count();
+    assert_eq!(
+        remaining_keypackages, 1,
+        "phase 1 must retain KeyPackages not named by the Welcome's public references"
+    );
+    assert!(
+        retired.key_package_bundle.is_none(),
+        "the field copy of the referenced KeyPackage must be retired"
+    );
+    assert!(
+        mimi_process_welcome_non_atomic(
+            replacement_welcome,
+            retired_bytes,
+            Vec::new(),
+            String::new()
+        )
+        .is_ok(),
+        "an unreferenced KeyPackage must remain usable after phase-1 retirement"
+    );
+}
+
+/// Defensive-invalid phase-2 inputs still return the already-prepared retirement as Spent.
+#[test]
+fn complete_welcome_invariant_failures_are_spent() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@invariant.test".to_string(), now).expect("generate alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@invariant.test".to_string(), now).expect("generate bob");
+    let group =
+        mimi_create_group("invariant-group".to_string(), alice.clone()).expect("create group");
+    let (_group, welcome) = mimi_add_member(group, alice, bob_kp).expect("add bob");
+
+    let mut missing_identity =
+        prepare_welcome_retirement(welcome.clone(), bob.clone(), Vec::new(), String::new())
+            .expect("prepare welcome");
+    let identity_retirement = missing_identity.retired_bundle().to_vec();
+    missing_identity.identity = None;
+    match complete_welcome(missing_identity) {
+        Err(MimiWelcomeError::Spent { retired_bundle, .. }) => {
+            assert_eq!(retired_bundle, identity_retirement)
+        }
+        other => panic!("missing identity must return Spent, got {other:?}"),
+    }
+
+    let mut missing_welcome = prepare_welcome_retirement(welcome, bob, Vec::new(), String::new())
+        .expect("prepare welcome");
+    let welcome_retirement = missing_welcome.retired_bundle().to_vec();
+    missing_welcome.welcome = None;
+    match complete_welcome(missing_welcome) {
+        Err(MimiWelcomeError::Spent { retired_bundle, .. }) => {
+            assert_eq!(retired_bundle, welcome_retirement)
+        }
+        other => panic!("missing Welcome must return Spent, got {other:?}"),
+    }
 }
 
 /// A non-targeting or hostile Welcome must not be able to force-retire the caller's KeyPackages (a
@@ -1031,7 +1163,7 @@ fn prepare_welcome_retirement_returns_unspent_for_a_non_targeting_welcome() {
     // bob's KeyPackage is intact: a genuine Welcome for bob still opens against his untouched bundle.
     let gb = mimi_create_group("nt-bob".to_string(), alice.clone()).expect("gb");
     let (_gb, welcome_for_bob) = mimi_add_member(gb, alice, bob_kp).expect("add bob");
-    mimi_process_welcome(welcome_for_bob, bob, Vec::new(), String::new())
+    mimi_process_welcome_non_atomic(welcome_for_bob, bob, Vec::new(), String::new())
         .expect("bob's own KeyPackage must still open a genuine Welcome (it was never retired)");
 }
 
@@ -1072,7 +1204,7 @@ fn two_phase_prepare_then_complete_joins_and_retires_the_keypackage() {
         "a successful two-phase join must retire the consumed KeyPackage's private bundle"
     );
 
-    let second = mimi_process_welcome(welcome2, retired, Vec::new(), String::new());
+    let second = mimi_process_welcome_non_atomic(welcome2, retired, Vec::new(), String::new());
     assert!(
         second.is_err(),
         "the two-phase precise retirement failed to block replay - single-use hole"
@@ -1139,7 +1271,7 @@ fn two_phase_hub_pin_rejection_keeps_the_retirement_durable() {
 
     // Both the phase-1 retirement AND the phase-2-returned retirement block replay of the KeyPackage.
     assert!(
-        mimi_process_welcome(
+        mimi_process_welcome_non_atomic(
             welcome2.clone(),
             phase1_retirement,
             Vec::new(),
@@ -1149,7 +1281,7 @@ fn two_phase_hub_pin_rejection_keeps_the_retirement_durable() {
         "the phase-1 retirement (already persisted) must block replay even though phase 2 rejected"
     );
     assert!(
-        mimi_process_welcome(welcome2, retired, Vec::new(), String::new()).is_err(),
+        mimi_process_welcome_non_atomic(welcome2, retired, Vec::new(), String::new()).is_err(),
         "the phase-2 retirement must block replay after a hub rejection"
     );
 }
