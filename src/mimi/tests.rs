@@ -137,6 +137,43 @@ fn member_add_remove_appsync_roster_round_trip() {
     );
 }
 
+/// A member that joined solely from a self-contained Welcome can become the next AppSync
+/// committer. The third join receives only that second Welcome: neither join is allowed an
+/// out-of-band ratchet tree.
+#[test]
+fn welcome_joiner_can_add_a_third_member_with_appsync() {
+    let now = now_secs();
+    let (_a, _alice_kp, alice) =
+        mimi_generate_identity("alice@welcome-chain.test".to_string(), now).expect("alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@welcome-chain.test".to_string(), now).expect("bob");
+    let (_c, carol_kp, carol) =
+        mimi_generate_identity("carol@welcome-chain.test".to_string(), now).expect("carol");
+
+    let alice_state =
+        mimi_create_group("welcome-chain-group".to_string(), alice.clone()).expect("create group");
+    let (_alice_state, welcome_bob) = mimi_add_member(alice_state, alice, bob_kp).expect("add bob");
+
+    // Bob receives the Welcome alone. An empty tree is the assertion that no caller-side tree
+    // export is available or required for this join.
+    let (bob_state, _bob_after_join) =
+        mimi_process_welcome_non_atomic(welcome_bob, bob.clone(), Vec::new(), String::new())
+            .expect("self-contained welcome joins bob");
+
+    let roster = vec![0x81, 0x83, 0x02];
+    let (_bob_state, welcome_carol, _appsync_commit) =
+        mimi_add_member_commit_appsync(bob_state, bob, carol_kp, roster)
+            .expect("welcome joiner adds carol with AppSync");
+
+    let (carol_state, _carol_after_join) =
+        mimi_process_welcome_non_atomic(welcome_carol, carol.clone(), Vec::new(), String::new())
+            .expect("self-contained AppSync welcome joins carol");
+    assert!(
+        !carol_state.is_empty(),
+        "carol received usable group state without an external tree"
+    );
+}
+
 /// The joiner receives ONLY the `MlsMessage(Welcome)` - no out-of-band ratchet tree - and must
 /// still join and exchange messages bidirectionally. Proves `use_ratchet_tree_extension(true)`
 /// embeds the tree and `mimi_process_welcome_non_atomic` reads it from the Welcome alone. This is the

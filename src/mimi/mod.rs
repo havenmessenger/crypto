@@ -1119,6 +1119,10 @@ pub fn complete_welcome(
         // must keep sending hub-readable (PublicMessage) handshake messages too, or the group's
         // hub-readability guarantee holds only until the first non-creator member commits.
         .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
+        // Match mimi_create_group so a member restored from a self-contained Welcome keeps
+        // embedding the ratchet tree in every Welcome it subsequently creates. Without this,
+        // its next Add opens only for a joiner with an external tree.
+        .use_ratchet_tree_extension(true)
         .build();
 
     // THE SPEND, on the ephemeral provider. OpenMLS deletes the (non-last-resort) KeyPackage at the
