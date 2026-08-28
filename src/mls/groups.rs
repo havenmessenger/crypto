@@ -38,6 +38,38 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::mls::{make_lifetime, GroupState, IdentityBundle, MlsSigner};
 
+/// The removal semantics of a complete MLS `Proposal` wire value.
+///
+/// This classifies the proposal itself, not an enclosing MLS message. Callers
+/// that receive a public MLS message must first extract its complete proposal
+/// field and then pass that field here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalClassification {
+    Remove,
+    SelfRemove,
+    Other,
+}
+
+/// Classify a complete MLS `Proposal` wire value.
+///
+/// The input is bounded before TLS decoding and must contain exactly one
+/// proposal. A malformed or trailing-byte value is refused rather than being
+/// classified as an ordinary proposal.
+pub fn classify_proposal(proposal_bytes: &[u8]) -> anyhow::Result<ProposalClassification> {
+    crate::mls::check_wire_size(proposal_bytes, "classify_proposal proposal")?;
+    let (proposal, trailing) = ProposalIn::tls_deserialize_bytes(proposal_bytes)
+        .map_err(|error| anyhow::anyhow!("Invalid MLS Proposal: {error}"))?;
+    if !trailing.is_empty() {
+        anyhow::bail!("MLS Proposal has trailing bytes");
+    }
+
+    Ok(match proposal {
+        ProposalIn::Remove(_) => ProposalClassification::Remove,
+        ProposalIn::SelfRemove => ProposalClassification::SelfRemove,
+        _ => ProposalClassification::Other,
+    })
+}
+
 pub fn regenerate_key_package(
     bundle_bytes: Vec<u8>,
     now_secs: i64,

@@ -11,13 +11,18 @@
 use super::*;
 use crate::identity::generate_identity;
 use crate::mls::groups::{
-    add_member, add_members_bulk, create_group, decrypt_message, encrypt_message, kp_storage_key,
-    list_members, mls_extract_signature_key, mls_process_commit, process_welcome,
-    regenerate_key_package, remove_member_by_credential, MAX_BULK_AGGREGATE_BYTES,
-    MAX_BULK_MEMBERS,
+    add_member, add_members_bulk, classify_proposal, create_group, decrypt_message,
+    encrypt_message, kp_storage_key, list_members, mls_extract_signature_key, mls_process_commit,
+    process_welcome, regenerate_key_package, remove_member_by_credential, ProposalClassification,
+    MAX_BULK_AGGREGATE_BYTES, MAX_BULK_MEMBERS,
 };
+use openmls::ciphersuite::signature::SignaturePublicKey;
+use openmls::credentials::{BasicCredential, CredentialWithKey};
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider;
 use std::mem::ManuallyDrop;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tls_codec::{Serialize as TlsSerialize, VLBytes};
 use zeroize::Zeroize;
 
 /// Real wall-clock seconds - `add_member`'s `KeyPackage::validate` checks lifetime against the
@@ -28,6 +33,94 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before epoch")
         .as_secs() as i64
+}
+
+fn classifier_group(
+    credential: &[u8],
+    self_remove: bool,
+) -> (OpenMlsRustCrypto, MlsSigner, MlsGroup) {
+    let provider = OpenMlsRustCrypto::default();
+    let scheme = SignatureScheme::ED25519;
+    let (private_key, public_key) = provider
+        .crypto()
+        .signature_key_gen(scheme)
+        .expect("generates classifier signing key");
+    let credential = CredentialWithKey {
+        credential: BasicCredential::new(credential.to_vec()).into(),
+        signature_key: SignaturePublicKey::from(public_key),
+    };
+    let config = if self_remove {
+        MlsGroupCreateConfig::builder()
+            .ciphersuite(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+            .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+            .capabilities(
+                Capabilities::builder()
+                    .proposals(vec![ProposalType::SelfRemove])
+                    .build(),
+            )
+            .build()
+    } else {
+        MlsGroupCreateConfig::builder()
+            .ciphersuite(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+            .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+            .build()
+    };
+    let signer = MlsSigner {
+        key: zeroize::Zeroizing::new(private_key),
+        scheme,
+    };
+    let group = MlsGroup::new(&provider, &signer, &config, credential)
+        .expect("creates classifier MLS group");
+    (provider, signer, group)
+}
+
+/// Extract the exact `Proposal` field emitted in a genuine public MLS message.
+/// The test intentionally mirrors the public-framing boundary a caller has already decoded.
+fn proposal_from_public_message(message: &MlsMessageOut) -> Vec<u8> {
+    let bytes = message
+        .tls_serialize_detached()
+        .expect("serializes public MLS Proposal");
+    let rest = &bytes[4..]; // MLSMessage version and wire format
+    let (_, rest) = VLBytes::tls_deserialize_bytes(rest).expect("reads group id");
+    let rest = &rest[8..]; // epoch
+    let rest = &rest[5..]; // member sender type and leaf index
+    let (_, rest) = VLBytes::tls_deserialize_bytes(rest).expect("reads authenticated data");
+    let (&content_type, proposal_wire) = rest.split_first().expect("reads content type");
+    assert_eq!(content_type, 2, "fixture is a public Proposal");
+    let (_, trailing) = ProposalIn::tls_deserialize_bytes(proposal_wire)
+        .expect("reads proposal from public MLS message");
+    proposal_wire[..proposal_wire.len() - trailing.len()].to_vec()
+}
+
+#[test]
+fn classify_proposal_distinguishes_remove_self_remove_and_update() {
+    let (provider, signer, mut group) = classifier_group(b"remove", false);
+    let (remove, _) = group
+        .propose_remove_member(&provider, &signer, LeafNodeIndex::new(0))
+        .expect("creates a genuine Remove proposal");
+    assert_eq!(
+        classify_proposal(&proposal_from_public_message(&remove)).expect("classifies Remove"),
+        ProposalClassification::Remove
+    );
+
+    let (provider, signer, mut group) = classifier_group(b"self-remove", true);
+    let self_remove = group
+        .leave_group_via_self_remove(&provider, &signer)
+        .expect("creates a genuine SelfRemove proposal");
+    assert_eq!(
+        classify_proposal(&proposal_from_public_message(&self_remove))
+            .expect("classifies SelfRemove"),
+        ProposalClassification::SelfRemove
+    );
+
+    let (provider, signer, mut group) = classifier_group(b"update", false);
+    let (update, _) = group
+        .propose_self_update(&provider, &signer, LeafNodeParameters::default())
+        .expect("creates a genuine Update proposal");
+    assert_eq!(
+        classify_proposal(&proposal_from_public_message(&update)).expect("classifies Update"),
+        ProposalClassification::Other
+    );
 }
 
 /// Proof that `GroupState`'s `Drop` body wipes `storage_map` values. Uses `ManuallyDrop` so the
