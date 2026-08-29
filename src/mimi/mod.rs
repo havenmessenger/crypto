@@ -1150,7 +1150,7 @@ pub fn complete_welcome(
     let ratchet_tree = match ratchet_tree_bytes {
         Some(ratchet_tree_bytes) => {
             match RatchetTreeIn::tls_deserialize_exact(ratchet_tree_bytes.as_slice()) {
-                Ok(ratchet_tree) => Some(ratchet_tree.into()),
+                Ok(ratchet_tree) => Some(ratchet_tree),
                 Err(e) => {
                     return Err(MimiWelcomeError::Spent {
                         retired_bundle: conservative.to_vec(),
