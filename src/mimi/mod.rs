@@ -597,6 +597,12 @@ pub fn mimi_add_member_commit_appsync(
         .merge_pending_commit(&provider)
         .map_err(|e| anyhow::anyhow!("Error merging commit: {:?}", e))?;
 
+    // Explicitly transport the post-commit ratchet tree with the Welcome.  Do not rely on
+    // use_ratchet_tree_extension: the persisted/reloaded group configuration may not retain that
+    // optional GroupInfo extension, while every AppSync join needs the complete public tree.
+    let ratchet_tree = group.export_ratchet_tree();
+    let ratchet_tree_bytes = ratchet_tree.tls_serialize_detached()?;
+
     let new_storage_map = {
         let values = provider.storage().values.read().unwrap();
         values.clone().into_iter().collect()
@@ -607,8 +613,9 @@ pub fn mimi_add_member_commit_appsync(
     };
     let new_group_state = crate::mls::zeroizing_json(&new_state)?;
     let welcome_bytes = welcome.tls_serialize_detached()?;
+    let combined_welcome = serde_json::to_vec(&(welcome_bytes, ratchet_tree_bytes))?;
     let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((new_group_state.to_vec(), welcome_bytes, commit_bytes))
+    Ok((new_group_state.to_vec(), combined_welcome, commit_bytes))
 }
 
 pub fn mimi_remove_member_commit_appsync(
@@ -818,11 +825,13 @@ pub struct PreparedWelcome {
     // drop; the caller's persisted copy is the durable one.
     retired_bundle: Vec<u8>,
     // Ephemeral phase-2 material. `identity` self-wipes (its Drop); `original_storage` is wiped by this
-    // struct's Drop; `welcome`/`expected_hub_entry` are public wire bytes. `Option` so complete_welcome
-    // can move them out of a Drop type via `.take()` (Rust forbids moving fields out of a Drop type).
+    // struct's Drop; `welcome`/`ratchet_tree`/`expected_hub_entry` are public wire bytes. `Option` so
+    // complete_welcome can move them out of a Drop type via `.take()` (Rust forbids moving fields out
+    // of a Drop type).
     identity: Option<IdentityBundle>,
     original_storage: Vec<(Vec<u8>, Vec<u8>)>,
     welcome: Option<Welcome>,
+    ratchet_tree: Option<Vec<u8>>,
     expected_hub_entry: Option<Vec<u8>>,
 }
 
@@ -983,11 +992,26 @@ pub fn prepare_welcome_retirement(
         &provider,
     );
 
-    crate::mls::check_wire_size(
-        &mls_welcome_message_bytes,
-        "prepare_welcome_retirement Welcome",
-    )?;
-    let mls_message = MlsMessageIn::tls_deserialize_exact(mls_welcome_message_bytes.as_slice())
+    // AppSync Welcome payloads use the same explicit `(Welcome, ratchet tree)` bundle as the native
+    // groups lane. Unpack before TLS-parsing the Welcome; the tree remains public wire material held
+    // for phase 2, after the caller has durably retired the targeted KeyPackage. The raw-Welcome
+    // fallback preserves the older foreign-MIMI convenience API, whose self-contained Welcomes carry
+    // their optional tree extension on the MLS wire rather than in the AppSync bundle.
+    let (raw_welcome_bytes, ratchet_tree_bytes): (Vec<u8>, Option<Vec<u8>>) =
+        match serde_json::from_slice(&mls_welcome_message_bytes) {
+            Ok((raw_welcome_bytes, ratchet_tree_bytes)) => {
+                (raw_welcome_bytes, Some(ratchet_tree_bytes))
+            }
+            Err(_) => (mls_welcome_message_bytes, None),
+        };
+    crate::mls::check_wire_size(&raw_welcome_bytes, "prepare_welcome_retirement Welcome")?;
+    if let Some(ratchet_tree_bytes) = &ratchet_tree_bytes {
+        crate::mls::check_wire_size(
+            ratchet_tree_bytes,
+            "prepare_welcome_retirement ratchet tree",
+        )?;
+    }
+    let mls_message = MlsMessageIn::tls_deserialize_exact(raw_welcome_bytes.as_slice())
         .map_err(|e| anyhow::anyhow!("Invalid MlsMessage: {:?}", e))?;
     let welcome = match mls_message.extract() {
         MlsMessageBodyIn::Welcome(w) => w,
@@ -1047,6 +1071,7 @@ pub fn prepare_welcome_retirement(
         identity: Some(identity),
         original_storage,
         welcome: Some(welcome),
+        ratchet_tree: ratchet_tree_bytes,
         expected_hub_entry,
     })
 }
@@ -1100,6 +1125,7 @@ pub fn complete_welcome(
             });
         }
     };
+    let ratchet_tree_bytes = prepared.ratchet_tree.take();
     let original_storage = mem::take(&mut prepared.original_storage);
     let expected_hub_entry = prepared.expected_hub_entry.take();
     // The conservative retirement the caller already persisted; the fail-closed fallback if the precise
@@ -1121,17 +1147,36 @@ pub fn complete_welcome(
         .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
         .build();
 
+    let ratchet_tree = match ratchet_tree_bytes {
+        Some(ratchet_tree_bytes) => {
+            match RatchetTreeIn::tls_deserialize_exact(ratchet_tree_bytes.as_slice()) {
+                Ok(ratchet_tree) => Some(ratchet_tree.into()),
+                Err(e) => {
+                    return Err(MimiWelcomeError::Spent {
+                        retired_bundle: conservative.to_vec(),
+                        reason: format!("Invalid ratchet tree: {e:?}"),
+                    });
+                }
+            }
+        }
+        None => None,
+    };
+
     // THE SPEND, on the ephemeral provider. OpenMLS deletes the (non-last-resort) KeyPackage at the
     // very start of new_from_welcome, before it finishes decrypting/validating - so BOTH new_from_welcome
     // and into_group can fail after the (ephemeral) KeyPackage is spent. A confirmation-tag mismatch is
     // a debug-build panic (openmls `debug_assert!`) that becomes a plain Err in release; catch_unwind
-    // stays as defense-in-depth (no longer the transaction boundary). None: the ratchet tree is embedded
-    // in the Welcome (use_ratchet_tree_extension).
+    // stays as defense-in-depth (no longer the transaction boundary). The explicit ratchet tree makes
+    // this independent of the optional Welcome ratchet-tree extension.
     let join: anyhow::Result<MlsGroup> =
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let staged =
-                StagedWelcome::new_from_welcome(&provider, &mls_group_config, welcome, None)
-                    .map_err(|e| anyhow::anyhow!("Error processing Welcome: {:?}", e))?;
+            let staged = StagedWelcome::new_from_welcome(
+                &provider,
+                &mls_group_config,
+                welcome,
+                ratchet_tree,
+            )
+            .map_err(|e| anyhow::anyhow!("Error processing Welcome: {:?}", e))?;
             staged
                 .into_group(&provider)
                 .map_err(|e| anyhow::anyhow!("Error joining group: {:?}", e))

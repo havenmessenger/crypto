@@ -93,9 +93,10 @@ fn member_add_remove_appsync_roster_round_trip() {
     let (alice_s, welcome_carol, add_commit) =
         mimi_add_member_commit_appsync(alice_s, alice.clone(), carol_kp, roster_add.clone())
             .expect("add carol with roster");
-    let (carol_s, _) =
-        mimi_process_welcome_non_atomic(welcome_carol, carol.clone(), Vec::new(), String::new())
-            .expect("carol joins");
+    let prepared =
+        prepare_welcome_retirement(welcome_carol, carol.clone(), Vec::new(), String::new())
+            .expect("prepare carol Welcome retirement");
+    let (carol_s, _) = complete_welcome(prepared).expect("carol joins");
     let (bob_s, surfaced_add, _sender) =
         mls_process_commit_appsync(bob_s, bob.clone(), add_commit).expect("bob processes add");
     assert_eq!(
@@ -625,6 +626,104 @@ fn signer_and_cwk(bundle_bytes: &[u8]) -> (MlsSigner, CredentialWithKey) {
         signature_key: public_key,
     };
     (signer, cwk)
+}
+
+/// Build an AppSync-capable group without the optional GroupInfo ratchet-tree extension. This mirrors
+/// the persisted/reloaded configuration gap that the AppSync Welcome bundle must tolerate.
+fn mimi_group_without_embedded_ratchet_tree(group_id: &str, bundle_bytes: &[u8]) -> Vec<u8> {
+    let mut identity: IdentityBundle = serde_json::from_slice(bundle_bytes).expect("valid bundle");
+    let provider = OpenMlsRustCrypto::default();
+    let signer = MlsSigner {
+        key: Zeroizing::new(std::mem::take(&mut identity.private_key)),
+        scheme: identity.signature_scheme,
+    };
+    let public_key = SignaturePublicKey::try_from(std::mem::take(&mut identity.public_key_bytes))
+        .expect("valid public key bytes");
+    let credential = BasicCredential::new(std::mem::take(&mut identity.user_id).into_bytes());
+    let credential_with_key = CredentialWithKey {
+        credential: credential.into(),
+        signature_key: public_key,
+    };
+    let config = MlsGroupCreateConfig::builder()
+        .ciphersuite(crate::suite_policy::mls_generation_suite())
+        .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .capabilities(mimi_appsync_capabilities())
+        .build();
+    let group = MlsGroup::new_with_group_id(
+        &provider,
+        &signer,
+        &config,
+        GroupId::from_slice(group_id.as_bytes()),
+        credential_with_key,
+    )
+    .expect("create group without embedded ratchet tree");
+    let storage_map = {
+        let values = provider.storage().values.read().unwrap();
+        values.clone().into_iter().collect()
+    };
+    crate::mls::zeroizing_json(&GroupState {
+        group_id: group.group_id().to_vec(),
+        storage_map,
+    })
+    .expect("serialize group state")
+    .to_vec()
+}
+
+/// An AppSync Welcome still joins when its optional embedded tree is absent: the sender explicitly
+/// bundles the post-commit tree and the two-phase receiver supplies it to OpenMLS.
+#[test]
+fn appsync_welcome_bundle_supplies_missing_ratchet_tree() {
+    let now = now_secs();
+    let (_a, _akp, alice) =
+        mimi_generate_identity("alice@bundle-tree.test".to_string(), now).expect("alice");
+    let (_b, bob_kp, bob) =
+        mimi_generate_identity("bob@bundle-tree.test".to_string(), now).expect("bob");
+    let alice_state = mimi_group_without_embedded_ratchet_tree("bundle-tree", &alice);
+    let (alice_state, welcome_payload, _commit) =
+        mimi_add_member_commit_appsync(alice_state, alice.clone(), bob_kp, vec![0x81, 0x81, 0x00])
+            .expect("add bob");
+
+    let (raw_welcome, ratchet_tree): (Vec<u8>, Vec<u8>) =
+        serde_json::from_slice(&welcome_payload).expect("Welcome payload is a bundle");
+    assert!(
+        !ratchet_tree.is_empty(),
+        "the AppSync Welcome bundle must carry an explicit ratchet tree"
+    );
+
+    // The same Welcome cannot join from its optional embedded extension: this group was deliberately
+    // created without one. Use a copy of Bob's bundle so this negative control cannot spend the real
+    // KeyPackage used by the succeeding crash-atomic path below.
+    let identity: IdentityBundle = serde_json::from_slice(&bob).expect("valid bob bundle");
+    let provider = OpenMlsRustCrypto::default();
+    {
+        let mut values = provider.storage().values.write().unwrap();
+        *values = identity.storage_map.clone().into_iter().collect();
+    }
+    let message = MlsMessageIn::tls_deserialize_exact(raw_welcome.as_slice())
+        .expect("raw Welcome is TLS framed");
+    let welcome = match message.extract() {
+        MlsMessageBodyIn::Welcome(welcome) => welcome,
+        _ => panic!("bundle's first element must be a Welcome"),
+    };
+    let join_config = MlsGroupJoinConfig::builder()
+        .wire_format_policy(MIXED_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .build();
+    assert!(
+        StagedWelcome::new_from_welcome(&provider, &join_config, welcome, None).is_err(),
+        "the missing embedded ratchet tree must reject an unbundled join"
+    );
+
+    let prepared =
+        prepare_welcome_retirement(welcome_payload, bob.clone(), Vec::new(), String::new())
+            .expect("phase 1 accepts the bundled Welcome");
+    let (bob_state, _) =
+        complete_welcome(prepared).expect("phase 2 joins with bundled ratchet tree");
+    let message = b"explicit ratchet tree works".to_vec();
+    let (_alice_state, ciphertext) =
+        encrypt_message(alice_state, alice, message.clone()).expect("alice encrypts");
+    let (_bob_state, plaintext, _sender) =
+        decrypt_message(bob_state, bob, ciphertext).expect("bob decrypts");
+    assert_eq!(plaintext, message);
 }
 
 /// Wire-knob KAT: a Lane::Mimi group's real Commit is PublicMessage-framed on the wire; a
