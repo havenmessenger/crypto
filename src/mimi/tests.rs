@@ -69,6 +69,54 @@ fn member_add_remove_commit_epoch_sync() {
     assert_eq!(pt_bob2, msg2, "bob must decrypt at the post-remove epoch");
 }
 
+#[test]
+fn indexed_mimi_remove_is_fenced_to_the_observed_leaf() {
+    let now = now_secs();
+    let (_aid, _akp, alice) =
+        mimi_generate_identity("alice-indexed@as.test".to_string(), now).expect("generate alice");
+    let (_bid, bob_kp, bob) =
+        mimi_generate_identity("bob-indexed@as.test".to_string(), now).expect("generate bob");
+    let (_cid, carol_kp, _carol) =
+        mimi_generate_identity("carol-indexed@as.test".to_string(), now).expect("generate carol");
+    let state = mimi_create_group("indexed_mimi".to_string(), alice.clone()).expect("create");
+    let (state, welcome_bob) = mimi_add_member(state, alice.clone(), bob_kp).expect("add bob");
+    let (bob_state, _) =
+        mimi_process_welcome_non_atomic(welcome_bob, bob.clone(), Vec::new(), String::new())
+            .expect("bob joins");
+    let (state, _welcome_carol, add_commit) =
+        mimi_add_member_commit(state, alice.clone(), carol_kp).expect("add carol");
+    let (bob_state, _sender) =
+        mls_process_commit(bob_state, bob.clone(), add_commit).expect("bob processes add");
+    let carol = crate::mls::groups::list_members_with_indices(state.clone())
+        .expect("list members")
+        .into_iter()
+        .find(|member| member.credential_identity == b"carol-indexed@as.test")
+        .expect("find carol leaf");
+
+    let mismatch = mimi_remove_member_commit_by_leaf_index(
+        state.clone(),
+        alice.clone(),
+        carol.leaf_index,
+        "00".repeat(32),
+    )
+    .expect_err("a stale leaf/key observation must fail closed");
+    assert!(mismatch.to_string().contains("expected signature key"));
+
+    let (state, remove_commit) = mimi_remove_member_commit_by_leaf_index(
+        state,
+        alice.clone(),
+        carol.leaf_index,
+        carol.signature_key.clone(),
+    )
+    .expect("remove exact leaf");
+    let (_bob_state, _sender) =
+        mls_process_commit(bob_state, bob, remove_commit).expect("bob processes remove");
+    assert!(!crate::mls::groups::list_members_with_indices(state)
+        .expect("list repaired group")
+        .iter()
+        .any(|member| member.signature_key == carol.signature_key));
+}
+
 /// Add/remove commits can carry a mimiParticipantList roster custom proposal IN the commit
 /// (atomic with the MLS op); an existing member's `mls_process_commit_appsync` must surface the
 /// roster payload AND stay epoch-synced. Uses `mimi_generate_identity` so every member

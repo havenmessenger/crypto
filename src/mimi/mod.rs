@@ -396,6 +396,65 @@ pub fn mimi_remove_member_commit(
     Ok((new_group_state.to_vec(), commit_bytes))
 }
 
+/// Mint a plain MIMI MLS Remove for one exact tree leaf.
+///
+/// This is the duplicate-leaf repair path: it intentionally carries no
+/// participant-list update because another leaf for the same application
+/// identity remains a participant.  The expected signature key fences the
+/// caller's indexed-tree observation against a changed group state.
+pub fn mimi_remove_member_commit_by_leaf_index(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    leaf_index: u32,
+    expected_signature_key: String,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let group_state_bytes = Zeroizing::new(group_state_bytes);
+    let bundle_bytes = Zeroizing::new(bundle_bytes);
+    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
+    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
+    let provider = OpenMlsRustCrypto::default();
+    {
+        let mut values = provider.storage().values.write().unwrap();
+        *values = mem::take(&mut state.storage_map).into_iter().collect();
+    }
+    let signer = MlsSigner {
+        key: Zeroizing::new(mem::take(&mut identity.private_key)),
+        scheme: identity.signature_scheme,
+    };
+    let group_id = GroupId::from_slice(&state.group_id);
+    let mut group = MlsGroup::load(provider.storage(), &group_id)
+        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+    let target_index = LeafNodeIndex::new(leaf_index);
+    let target = group
+        .members()
+        .find(|member| member.index == target_index)
+        .ok_or_else(|| anyhow::anyhow!("MLS leaf index {leaf_index} is not occupied"))?;
+    anyhow::ensure!(
+        hex::encode_upper(&target.signature_key) == expected_signature_key.to_ascii_uppercase(),
+        "MLS leaf index {leaf_index} does not carry the expected signature key"
+    );
+    let (commit, _welcome, _group_info) = group
+        .remove_members(&provider, &signer, &[target_index])
+        .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
+    group
+        .merge_pending_commit(&provider)
+        .map_err(|e| anyhow::anyhow!("Error merging remove commit: {:?}", e))?;
+    let new_storage_map = {
+        let values = provider.storage().values.read().unwrap();
+        values.clone().into_iter().collect()
+    };
+    let new_state = GroupState {
+        group_id: mem::take(&mut state.group_id),
+        storage_map: new_storage_map,
+    };
+    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
+    let commit_bytes = commit.tls_serialize_detached()?;
+    Ok((new_group_state.to_vec(), commit_bytes))
+}
+
 /// The mimi-lane external-proposal acceptance path
 /// (`crypto-core::profile::allows_external_proposal(Profile::Haven, Lane::Mimi) ==
 /// AllowlistedRemoveOnly`). An existing member receives a pending external proposal, already

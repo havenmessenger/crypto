@@ -12,8 +12,9 @@ use super::*;
 use crate::identity::generate_identity;
 use crate::mls::groups::{
     add_member, add_members_bulk, classify_proposal, create_group, decrypt_message,
-    encrypt_message, kp_storage_key, list_members, mls_extract_signature_key, mls_process_commit,
-    process_welcome, regenerate_key_package, remove_member_by_credential, ProposalClassification,
+    encrypt_message, kp_storage_key, list_members, list_members_with_indices,
+    mls_extract_signature_key, mls_process_commit, process_welcome, regenerate_key_package,
+    remove_member_by_credential, remove_member_by_leaf_index, ProposalClassification,
     MAX_BULK_AGGREGATE_BYTES, MAX_BULK_MEMBERS,
 };
 use openmls::ciphersuite::signature::SignaturePublicKey;
@@ -288,6 +289,49 @@ fn group_lifecycle_round_trips_after_zeroize_refactor() {
             .expect("remove_member_by_credential");
     let state: GroupState = serde_json::from_slice(&group_state_a4).expect("deserialize");
     assert_eq!(state.group_id, b"test-group");
+}
+
+#[test]
+fn indexed_remove_targets_one_of_two_leaves_with_the_same_credential() {
+    let now = now_secs();
+    let (_alice_id, _alice_kp, alice) =
+        generate_identity("alice-indexed".to_string(), now).expect("generate alice");
+    let (_first_id, first_kp, _first_bundle) =
+        generate_identity("shared-credential".to_string(), now).expect("generate first leaf");
+    let (_second_id, second_kp, _second_bundle) =
+        generate_identity("shared-credential".to_string(), now).expect("generate second leaf");
+    let state = create_group("indexed-remove".to_string(), alice.clone()).expect("create group");
+    let (state, _welcome, _commit) =
+        add_members_bulk(state, alice.clone(), vec![first_kp, second_kp])
+            .expect("add two leaves with the same BasicCredential identity");
+    let shared: Vec<_> = list_members_with_indices(state.clone())
+        .expect("list indexed members")
+        .into_iter()
+        .filter(|member| member.credential_identity == b"shared-credential")
+        .collect();
+    assert_eq!(
+        shared.len(),
+        2,
+        "fixture must contain two matching credentials"
+    );
+    assert_ne!(shared[0].leaf_index, shared[1].leaf_index);
+
+    let retained_key = shared[0].signature_key.clone();
+    let removed = &shared[1];
+    let (state, _commit) = remove_member_by_leaf_index(
+        state,
+        alice,
+        removed.leaf_index,
+        removed.signature_key.clone(),
+    )
+    .expect("remove the selected duplicate leaf");
+    let remaining = list_members_with_indices(state).expect("list repaired group");
+    assert!(remaining
+        .iter()
+        .any(|member| member.signature_key == retained_key));
+    assert!(!remaining
+        .iter()
+        .any(|member| member.signature_key == removed.signature_key));
 }
 
 /// Regression test: a THIRD member joining must not strand an EXISTING member on

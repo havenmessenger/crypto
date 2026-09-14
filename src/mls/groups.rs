@@ -50,6 +50,20 @@ pub enum ProposalClassification {
     Other,
 }
 
+/// One concrete MLS tree leaf.
+///
+/// Higher-level identity types remain outside crypto-core.  Callers that use a
+/// self-certifying identity derive it from `signature_key`, while
+/// `credential_identity` exposes the BasicCredential bytes for diagnostics and
+/// migration audits.  `leaf_index` is the only unambiguous removal address when
+/// two leaves carry the same identity material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMlsMember {
+    pub leaf_index: u32,
+    pub credential_identity: Vec<u8>,
+    pub signature_key: String,
+}
+
 /// Classify a complete MLS `Proposal` wire value.
 ///
 /// The input is bounded before TLS decoding and must contain exactly one
@@ -601,6 +615,67 @@ pub fn remove_member_by_credential(
     ))
 }
 
+/// Remove exactly one MLS leaf, refusing if the leaf no longer carries the
+/// expected signature key.
+///
+/// The expected key binds an operator's earlier indexed-tree selection to the
+/// state used to mint the Commit.  A changed or compacted tree therefore fails
+/// closed instead of removing whichever member later occupies that index.
+pub fn remove_member_by_leaf_index(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    leaf_index: u32,
+    expected_signature_key: String,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let group_state_bytes = Zeroizing::new(group_state_bytes);
+    let bundle_bytes = Zeroizing::new(bundle_bytes);
+    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
+    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
+    let provider = OpenMlsRustCrypto::default();
+    {
+        let mut values = provider.storage().values.write().unwrap();
+        *values = mem::take(&mut state.storage_map).into_iter().collect();
+    }
+    let signer = MlsSigner {
+        key: Zeroizing::new(mem::take(&mut identity.private_key)),
+        scheme: identity.signature_scheme,
+    };
+    let group_id = GroupId::from_slice(&state.group_id);
+    let mut group = MlsGroup::load(provider.storage(), &group_id)
+        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+    let target_index = LeafNodeIndex::new(leaf_index);
+    let target = group
+        .members()
+        .find(|member| member.index == target_index)
+        .ok_or_else(|| anyhow::anyhow!("MLS leaf index {leaf_index} is not occupied"))?;
+    anyhow::ensure!(
+        hex::encode_upper(&target.signature_key) == expected_signature_key.to_ascii_uppercase(),
+        "MLS leaf index {leaf_index} does not carry the expected signature key"
+    );
+    let (commit, _welcome, _group_info) = group
+        .remove_members(&provider, &signer, &[target_index])
+        .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
+    group
+        .merge_pending_commit(&provider)
+        .map_err(|e| anyhow::anyhow!("Error merging remove commit: {:?}", e))?;
+    let new_storage_map = {
+        let values = provider.storage().values.read().unwrap();
+        values.clone().into_iter().collect()
+    };
+    let new_state = GroupState {
+        group_id: mem::take(&mut state.group_id),
+        storage_map: new_storage_map,
+    };
+    let commit_bytes = commit.tls_serialize_detached()?;
+    Ok((
+        crate::mls::zeroizing_json(&new_state)?.to_vec(),
+        commit_bytes,
+    ))
+}
+
 /// List the current members of the group, one uppercase-hex signature key per leaf.
 ///
 /// Answers *who is in this group*, never *who may do what*. Membership is not an authority input:
@@ -627,6 +702,18 @@ pub fn remove_member_by_credential(
 /// `mls_extract_signature_key` returns it, so the mapping from key to an identity type stays in
 /// the application that defines that type.
 pub fn list_members(group_state_bytes: Vec<u8>) -> anyhow::Result<Vec<String>> {
+    Ok(list_members_with_indices(group_state_bytes)?
+        .into_iter()
+        .map(|member| member.signature_key)
+        .collect())
+}
+
+/// List every occupied MLS leaf with its stable tree index and identity
+/// material.  Unlike [`list_members`], this surface preserves duplicate leaves
+/// and gives an operator an exact address for a later guarded removal.
+pub fn list_members_with_indices(
+    group_state_bytes: Vec<u8>,
+) -> anyhow::Result<Vec<IndexedMlsMember>> {
     // Wrap the owned input on entry (see regenerate_key_package's comment). No IdentityBundle and
     // no signer: this path cannot produce a Commit, so it cannot mutate the group.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
@@ -645,10 +732,18 @@ pub fn list_members(group_state_bytes: Vec<u8>) -> anyhow::Result<Vec<String>> {
         .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
         .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
 
-    Ok(group
+    group
         .members()
-        .map(|m| hex::encode_upper(m.signature_key.as_slice()))
-        .collect())
+        .map(|member| {
+            let credential = BasicCredential::try_from(member.credential)
+                .map_err(|_| anyhow::anyhow!("MLS leaf uses a non-Basic credential"))?;
+            Ok(IndexedMlsMember {
+                leaf_index: member.index.u32(),
+                credential_identity: credential.identity().to_vec(),
+                signature_key: hex::encode_upper(member.signature_key),
+            })
+        })
+        .collect()
 }
 
 /// The OpenMLS `MemoryStorage` key under which a KeyPackage is stored: the `KeyPackage` label, the
