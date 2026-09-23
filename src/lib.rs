@@ -8,6 +8,7 @@ pub mod identity;
 pub mod mime;
 pub mod mimi;
 pub mod mls;
+pub mod pake;
 pub mod pgp;
 pub mod profile;
 pub mod secret_store;

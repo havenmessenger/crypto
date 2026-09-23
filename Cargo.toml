@@ -47,6 +47,8 @@ ctr = { version = "0.9", default-features = false }
 bip39 = "2.2.2"
 base64 = "0.22"
 thiserror = "2"
+spake2 = "0.4.0"
+subtle = "2"
 
 [profile.release]
 lto = "thin"
