@@ -88,6 +88,14 @@ pub fn regenerate_key_package(
     bundle_bytes: Vec<u8>,
     now_secs: i64,
 ) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+    regenerate_key_package_with_capabilities(bundle_bytes, now_secs, None)
+}
+
+pub(crate) fn regenerate_key_package_with_capabilities(
+    bundle_bytes: Vec<u8>,
+    now_secs: i64,
+    required_capabilities: Option<Capabilities>,
+) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
     // The owned JSON-serialized bundle bytes carry the same plaintext private
     // key the deserialized IdentityBundle wipes on drop - wrap on entry so the raw input
     // buffer is wiped too, not just the typed struct it decodes into.
@@ -133,21 +141,20 @@ pub fn regenerate_key_package(
     let capabilities = old
         .key_package_bundle
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("stored identity has no KeyPackage bundle"))?
-        .key_package()
-        .leaf_node()
-        .capabilities()
-        .clone();
-    let new_key_package_bundle = KeyPackage::builder()
+        .map(|bundle| bundle.key_package().leaf_node().capabilities().clone());
+    let builder = KeyPackage::builder()
         .key_package_extensions(Extensions::empty())
-        .key_package_lifetime(lifetime)
-        .leaf_node_capabilities(capabilities)
-        .build(
-            crate::suite_policy::mls_generation_suite(),
-            &provider,
-            &signer,
-            credential_with_key,
-        )?;
+        .key_package_lifetime(lifetime);
+    let builder = match required_capabilities.or(capabilities) {
+        Some(capabilities) => builder.leaf_node_capabilities(capabilities),
+        None => builder,
+    };
+    let new_key_package_bundle = builder.build(
+        crate::suite_policy::mls_generation_suite(),
+        &provider,
+        &signer,
+        credential_with_key,
+    )?;
 
     let new_key_package = new_key_package_bundle.key_package();
     let new_key_package_bytes = new_key_package.tls_serialize_detached()?;

@@ -81,6 +81,19 @@ pub fn mimi_generate_identity(
     crate::identity::build_identity_from_keypair(user_id, now_secs, priv_bytes, pub_bytes, true)
 }
 
+/// Refresh a MIMI KeyPackage even after its previous package was consumed by a Welcome.
+/// The resulting leaf still advertises support for participant-list AppSync proposals.
+pub fn mimi_regenerate_key_package(
+    bundle_bytes: Vec<u8>,
+    now_secs: i64,
+) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+    crate::mls::groups::regenerate_key_package_with_capabilities(
+        bundle_bytes,
+        now_secs,
+        Some(mimi_appsync_capabilities()),
+    )
+}
+
 pub fn mimi_create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     // Wrap the owned bundle input on entry - the same gap
     // crate::mls::groups::create_group's comment describes, closed the same way here.
