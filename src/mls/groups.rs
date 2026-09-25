@@ -127,9 +127,21 @@ pub fn regenerate_key_package(
         .map_err(|_| anyhow::anyhow!("now_secs must be non-negative, got {now_secs}"))?;
     let lifetime = make_lifetime(now_secs_u64)?;
 
+    // A refreshed package must advertise the same proposal capabilities as
+    // the package it replaces. In particular, a MIMI member that drops its
+    // AppSync capability would prevent the next participant-list Add commit.
+    let capabilities = old
+        .key_package_bundle
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("stored identity has no KeyPackage bundle"))?
+        .key_package()
+        .leaf_node()
+        .capabilities()
+        .clone();
     let new_key_package_bundle = KeyPackage::builder()
         .key_package_extensions(Extensions::empty())
         .key_package_lifetime(lifetime)
+        .leaf_node_capabilities(capabilities)
         .build(
             crate::suite_policy::mls_generation_suite(),
             &provider,

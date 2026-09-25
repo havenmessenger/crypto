@@ -8,6 +8,20 @@
 use super::*;
 use crate::mls::groups::{decrypt_message, encrypt_message, mls_process_commit};
 
+#[test]
+fn refreshed_mimi_key_package_keeps_appsync_adds_possible() {
+    let now = now_secs();
+    let (_, _, alice) = mimi_generate_identity("alice@as.test".into(), now).unwrap();
+    let (_, _, bob) = mimi_generate_identity("bob@as.test".into(), now).unwrap();
+    let (_, carol_kp, _) = mimi_generate_identity("carol@as.test".into(), now).unwrap();
+    let (_, bob_kp, _) = crate::mls::groups::regenerate_key_package(bob, now + 1).unwrap();
+    let group = mimi_create_group("refresh-caps".into(), alice.clone()).unwrap();
+    let (group, _, _) =
+        mimi_add_member_commit_appsync(group, alice.clone(), bob_kp, vec![1]).unwrap();
+    mimi_add_member_commit_appsync(group, alice, carol_kp, vec![2])
+        .expect("a refreshed MIMI leaf must still support the next AppSync proposal");
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
