@@ -203,6 +203,74 @@ fn member_add_remove_appsync_roster_round_trip() {
     );
 }
 
+#[test]
+fn bulk_appsync_add_has_one_commit_and_welcome_for_both_new_members() {
+    let now = now_secs();
+    let (_, _, alice) = mimi_generate_identity("alice-bulk@as.test".into(), now).unwrap();
+    let (_, dave_kp, dave) = mimi_generate_identity("dave-bulk@as.test".into(), now).unwrap();
+    let (_, bob_kp, bob) = mimi_generate_identity("bob-bulk@as.test".into(), now).unwrap();
+    let (_, carol_kp, carol) = mimi_generate_identity("carol-bulk@as.test".into(), now).unwrap();
+    let group = mimi_create_group("bulk-appsync".into(), alice.clone()).unwrap();
+    let (group, welcome_dave, _) =
+        mimi_add_member_commit_appsync(group, alice.clone(), dave_kp, vec![1]).unwrap();
+    let (dave_state, _) =
+        mimi_process_welcome_non_atomic(welcome_dave, dave.clone(), Vec::new(), String::new())
+            .unwrap();
+
+    let roster = vec![0x81, 0x83, 0x01];
+    let (alice_state, shared_welcome, commit) = mimi_add_members_bulk_commit_appsync(
+        group,
+        alice.clone(),
+        vec![bob_kp, carol_kp],
+        roster.clone(),
+    )
+    .unwrap();
+    let (bob_state, _) = mimi_process_welcome_non_atomic(
+        shared_welcome.clone(),
+        bob.clone(),
+        Vec::new(),
+        String::new(),
+    )
+    .unwrap();
+    let (carol_state, _) =
+        mimi_process_welcome_non_atomic(shared_welcome, carol.clone(), Vec::new(), String::new())
+            .unwrap();
+    let (dave_state, surfaced, _) =
+        mls_process_commit_appsync(dave_state, dave.clone(), commit).unwrap();
+    assert_eq!(surfaced, roster);
+
+    let message = b"one-commit-bulk-add".to_vec();
+    let (_, ciphertext) = encrypt_message(alice_state, alice, message.clone()).unwrap();
+    for (state, bundle) in [(bob_state, bob), (carol_state, carol), (dave_state, dave)] {
+        let (_, plaintext, _) = decrypt_message(state, bundle, ciphertext.clone()).unwrap();
+        assert_eq!(plaintext, message);
+    }
+}
+
+#[test]
+fn bulk_appsync_add_rejects_empty_and_oversized_batches() {
+    let (_, _, alice) = mimi_generate_identity("alice-bounds@as.test".into(), now_secs()).unwrap();
+    let group = mimi_create_group("bulk-bounds".into(), alice.clone()).unwrap();
+    assert!(mimi_add_members_bulk_commit_appsync(
+        group.clone(),
+        alice.clone(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("requires a KeyPackage"));
+    assert!(mimi_add_members_bulk_commit_appsync(
+        group,
+        alice,
+        vec![Vec::new(); crate::mls::groups::MAX_BULK_MEMBERS + 1],
+        Vec::new(),
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("member cap"));
+}
+
 /// The joiner receives ONLY the `MlsMessage(Welcome)` - no out-of-band ratchet tree - and must
 /// still join and exchange messages bidirectionally. Proves `use_ratchet_tree_extension(true)`
 /// embeds the tree and `mimi_process_welcome_non_atomic` reads it from the Welcome alone. This is the

@@ -614,6 +614,35 @@ pub fn mimi_add_member_commit_appsync(
     key_package_bytes: Vec<u8>,
     roster_payload: Vec<u8>,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    mimi_add_members_bulk_commit_appsync(
+        group_state_bytes,
+        bundle_bytes,
+        vec![key_package_bytes],
+        roster_payload,
+    )
+}
+
+/// Commit one roster proposal and all Adds atomically. The returned Welcome applies to every
+/// newly added member; pre-commit members receive the Commit instead.
+pub fn mimi_add_members_bulk_commit_appsync(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    key_packages_bytes: Vec<Vec<u8>>,
+    roster_payload: Vec<u8>,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    anyhow::ensure!(
+        !key_packages_bytes.is_empty(),
+        "mimi bulk Add requires a KeyPackage"
+    );
+    anyhow::ensure!(
+        key_packages_bytes.len() <= crate::mls::groups::MAX_BULK_MEMBERS,
+        "mimi bulk Add exceeds member cap"
+    );
+    anyhow::ensure!(
+        key_packages_bytes.iter().map(Vec::len).sum::<usize>()
+            <= crate::mls::groups::MAX_BULK_AGGREGATE_BYTES,
+        "mimi bulk Add exceeds aggregate KeyPackage cap"
+    );
     // Wrap both owned secret-bearing inputs on entry (see mimi_add_member's
     // comment). roster_payload is the AppSync custom-proposal payload - not secret.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
@@ -636,15 +665,18 @@ pub fn mimi_add_member_commit_appsync(
         .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
         .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
 
-    crate::mls::check_wire_size(&key_package_bytes, "mimi KeyPackage")?;
-    let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes.as_slice())
-        .map_err(|e| anyhow::anyhow!("Invalid KeyPackage: {:?}", e))?;
-    let validated_kp = key_package
-        .validate(provider.crypto(), ProtocolVersion::Mls10)
-        .map_err(|e| anyhow::anyhow!("KeyPackage validation failed: {:?}", e))?;
-
-    // INV-MLS-002 explicit accept-gate (MIMI foreign-ingest): refuse a foreign-suite KeyPackage.
-    crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
+    let mut validated_kps = Vec::with_capacity(key_packages_bytes.len());
+    for key_package_bytes in &key_packages_bytes {
+        crate::mls::check_wire_size(key_package_bytes, "mimi KeyPackage")?;
+        let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("Invalid KeyPackage: {:?}", e))?;
+        let validated_kp = key_package
+            .validate(provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| anyhow::anyhow!("KeyPackage validation failed: {:?}", e))?;
+        // INV-MLS-002: validate every foreign KeyPackage before building the commit.
+        crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
+        validated_kps.push(validated_kp);
+    }
 
     // Stage the roster custom proposal (by value, into the pending store), then build ONE commit that
     // ALSO inlines the Add by value (commit builder `propose_adds`) - both BY VALUE so the receiver can
@@ -656,7 +688,7 @@ pub fn mimi_add_member_commit_appsync(
     let (commit, welcome, _gi) = group
         .commit_builder()
         .consume_proposal_store(true) // include the pending roster custom proposal
-        .propose_adds([validated_kp]) // + the Add, inlined by value
+        .propose_adds(validated_kps) // + every Add, inlined by value
         .load_psks(provider.storage())
         .map_err(|e| anyhow::anyhow!("Error loading psks: {:?}", e))?
         .build(provider.rand(), provider.crypto(), &signer, |_| true)
