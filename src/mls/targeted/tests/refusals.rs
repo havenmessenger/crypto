@@ -17,12 +17,12 @@ use crate::mls::targeted::{
 use crate::mls::MlsSigner;
 use crate::suite_policy::targeted_message_suite;
 
-fn parse(envelope: &[u8]) -> TargetedMessage {
+pub(super) fn parse(envelope: &[u8]) -> TargetedMessage {
     let envelope: Envelope = from_bytes_exact(envelope).expect("envelope");
     from_bytes_exact(envelope.targeted_message.as_slice()).expect("message")
 }
 
-fn assemble(message: &TargetedMessage) -> Vec<u8> {
+pub(super) fn assemble(message: &TargetedMessage) -> Vec<u8> {
     to_bytes(&Envelope {
         draft_version: crate::mls::targeted::wire::DRAFT_VERSION_01,
         targeted_message: VLBytes::new(to_bytes(message).expect("message bytes")),
@@ -30,7 +30,7 @@ fn assemble(message: &TargetedMessage) -> Vec<u8> {
     .expect("envelope bytes")
 }
 
-fn mutate(envelope: &[u8], edit: impl FnOnce(&mut TargetedMessage)) -> Vec<u8> {
+pub(super) fn mutate(envelope: &[u8], edit: impl FnOnce(&mut TargetedMessage)) -> Vec<u8> {
     let mut message = parse(envelope);
     edit(&mut message);
     assemble(&message)
@@ -45,7 +45,7 @@ fn flip(bytes: &mut VLBytes, at: usize) {
 
 /// Re-encrypt the sender authentication data with `edit` applied, using the exporter secret the
 /// recipient's own group holds (any member of the epoch can do this: the secret is group-wide).
-fn forge_sender_auth(
+pub(super) fn forge_sender_auth(
     member: &Peer,
     envelope: &[u8],
     edit: impl FnOnce(&mut SenderAuthData),
@@ -92,17 +92,45 @@ fn forge_sender_auth(
     assemble(&message)
 }
 
-fn reset_open_calls() {
+/// Like [`forge_sender_auth`], but the decrypted sender data is replaced by arbitrary bytes.
+pub(super) fn forge_sender_auth_raw(member: &Peer, envelope: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let group = member.group();
+    let crypto = member.provider.crypto();
+    let suite = targeted_message_suite(group.ciphersuite()).expect("suite");
+    let secrets = epoch_secrets(crypto, group, &suite).expect("secrets");
+    let mut message = parse(envelope);
+    let (key, nonce) = sender_auth_key_nonce(
+        crypto,
+        &suite,
+        &secrets.sender_auth_data,
+        message.ciphertext.as_slice(),
+    )
+    .expect("key and nonce");
+    let aad = to_bytes(&SenderAuthDataAad {
+        group_id: message.group_id.as_slice(),
+        epoch: message.epoch,
+        recipient_leaf_index: message.recipient_leaf_index,
+    })
+    .expect("aad");
+    let forged = crypto
+        .aead_encrypt(suite.aead, &key, plaintext, &nonce, &aad)
+        .expect("encrypt sender auth data");
+    message.encrypted_sender_auth_data = VLBytes::new(forged);
+    assemble(&message)
+}
+
+pub(super) fn reset_open_calls() {
     hpke::OPEN_CALLS.with(|calls| calls.set(0));
 }
 
-fn open_calls() -> usize {
+pub(super) fn open_calls() -> usize {
     hpke::OPEN_CALLS.with(std::cell::Cell::get)
 }
 
-const PAYLOAD: &[u8] = b"a payload long enough that the ciphertext is well past the sample";
+pub(super) const PAYLOAD: &[u8] =
+    b"a payload long enough that the ciphertext is well past the sample";
 
-fn sealed_a_to_b() -> (Peer, Peer, Peer, Vec<u8>) {
+pub(super) fn sealed_a_to_b() -> (Peer, Peer, Peer, Vec<u8>) {
     let (a, b, c) = three();
     let sealed = seal(
         &a.provider,
@@ -346,9 +374,6 @@ fn malformed_and_oversized_envelopes_are_refused() {
     );
     assert_eq!(open_b(&[]), Some(OpenError::Malformed));
     assert_eq!(open_b(&[0x01; 64]), Some(OpenError::Malformed));
-    // A length-of-length prefix above four bytes is an error in a release build; tls_codec trips a
-    // debug assertion on it instead, so this case only runs where assertions are off.
-    #[cfg(not(debug_assertions))]
     assert_eq!(open_b(&[0xff; 64]), Some(OpenError::Malformed));
 
     let mut envelope: Envelope = from_bytes_exact(&sealed).expect("envelope");

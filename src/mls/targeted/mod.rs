@@ -33,15 +33,15 @@ use openmls::prelude::{LeafNodeIndex, MlsGroup};
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::signatures::Signer;
 use openmls_traits::OpenMlsProvider;
-use tls_codec::{Deserialize, SecretVLBytes, Serialize, VLBytes};
+use tls_codec::{SecretVLBytes, Serialize, VLBytes};
 use zeroize::Zeroizing;
 
 use crate::mls::MAX_MLS_WIRE_BYTES;
 use crate::suite_policy::{targeted_message_suite, TargetedSuite};
 use wire::{
-    from_bytes_exact, to_bytes, Envelope, HpkeContext, PskId, SenderAuthData, SenderAuthDataAad,
-    TargetedMessage, Tbm, Tbs, DRAFT_VERSION_01, HPKE_CONTEXT_LABEL, PROTOCOL_VERSION_MLS10,
-    PSK_LABEL, WIRE_FORMAT_TARGETED_MESSAGE,
+    from_bytes_exact, parse_content, to_bytes, Envelope, HpkeContext, PskId, SenderAuthData,
+    SenderAuthDataAad, TargetedMessage, Tbm, Tbs, DRAFT_VERSION_01, HPKE_CONTEXT_LABEL,
+    PROTOCOL_VERSION_MLS10, PSK_LABEL, WIRE_FORMAT_TARGETED_MESSAGE,
 };
 
 /// Exporter label shared by both derived secrets (draft section 5).
@@ -140,20 +140,24 @@ fn epoch_secrets(
     group: &MlsGroup,
     suite: &TargetedSuite,
 ) -> Option<EpochSecrets> {
-    let psk = group
-        .export_secret(crypto, EXPORTER_LABEL, EXPORTER_CONTEXT_PSK, suite.kdf_nh)
-        .ok()?;
-    let sender_auth_data = group
-        .export_secret(
-            crypto,
-            EXPORTER_LABEL,
-            EXPORTER_CONTEXT_SENDER_AUTH,
-            suite.kdf_nh,
-        )
-        .ok()?;
+    let psk = Zeroizing::new(
+        group
+            .export_secret(crypto, EXPORTER_LABEL, EXPORTER_CONTEXT_PSK, suite.kdf_nh)
+            .ok()?,
+    );
+    let sender_auth_data = Zeroizing::new(
+        group
+            .export_secret(
+                crypto,
+                EXPORTER_LABEL,
+                EXPORTER_CONTEXT_SENDER_AUTH,
+                suite.kdf_nh,
+            )
+            .ok()?,
+    );
     Some(EpochSecrets {
-        psk: Zeroizing::new(psk),
-        sender_auth_data: Zeroizing::new(sender_auth_data),
+        psk,
+        sender_auth_data,
     })
 }
 
@@ -479,16 +483,15 @@ pub fn open<P: OpenMlsProvider>(
     authenticate_sender(crypto, &suite, group, &message, &sender_auth)?;
     let content = decrypt_content(provider, group, &suite, &secrets, &message, &sender_auth)?;
 
-    let mut rest: &[u8] = &content;
-    let application_data =
-        SecretVLBytes::tls_deserialize(&mut rest).map_err(|_| OpenError::Malformed)?;
-    if rest.iter().any(|byte| *byte != 0) {
+    let (application_data, padding) = parse_content(&content).ok_or(OpenError::Malformed)?;
+    if padding.iter().any(|byte| *byte != 0) {
         return Err(OpenError::Padding);
     }
+    let application_data = Zeroizing::new(application_data.to_vec());
 
     Ok(Opened {
         sender_leaf_index: sender_auth.sender_leaf_index,
         authenticated_data: message.authenticated_data.as_slice().to_vec(),
-        application_data: Zeroizing::new(application_data.as_slice().to_vec()),
+        application_data,
     })
 }

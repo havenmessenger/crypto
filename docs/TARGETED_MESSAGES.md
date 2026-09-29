@@ -65,11 +65,24 @@ struct {
 } Envelope;
 ```
 
-`draft_version` names the draft revision the inner bytes follow. `open` refuses a version it does not
+The envelope is this library's framing, **not** the draft's `MLSMessage` framing (the codepoint is unassigned).
+The inner `TargetedMessage` bytes are exactly the draft's structure; a future `MLSMessage` wrapper, or an
+assigned codepoint, is a new envelope version. `draft_version` names the draft revision the inner bytes follow. `open` refuses a version it does not
 implement before it reads the body, and refuses trailing bytes. The suggested wire-format value is part
 of the signed bytes, so a later revision of the draft, or an assigned codepoint that differs, is a **new
 `draft_version`** rather than a change to version 1. When the draft becomes an RFC, the RFC framing is
 added alongside and this one is retired deliberately.
+
+## Parsing untrusted input
+
+Every field of an envelope, a message, the decrypted sender data and the decrypted content is read by a
+small bounds-checked reader in this module, not by `tls_codec`'s decoder. That decoder allocates the whole
+claimed length of a variable-length vector before it reads the bytes (up to 2^30 - 1), which in a browser
+is an attacker-controlled memory allocation, and it asserts on a malformed length prefix in debug builds.
+The reader checks each prefix (one, two or four bytes, the shortest form, no longer than the bytes that
+remain) before it takes anything, so a hostile length can neither allocate nor panic. Tests cover a
+0x3fffffff prefix, an eight-byte prefix, a non-minimal prefix, a prefix longer than the input, and every
+truncation, at each level, in debug and release.
 
 ## What it does not give
 
