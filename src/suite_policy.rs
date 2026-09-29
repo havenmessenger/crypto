@@ -21,6 +21,9 @@
 //! These accessors/gates are `pub(crate)` - internal seam helpers, never FRB-exposed to Dart.
 
 use openmls::prelude::{Ciphersuite, KeyPackage, Welcome};
+use openmls_traits::types::{
+    AeadType, HashType, HpkeAeadType, HpkeKdfType, HpkeKemType, SignatureScheme,
+};
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use tls_codec::Serialize as TlsSerialize;
 
@@ -115,6 +118,46 @@ pub fn gate_inbound_keypackage(kp: &KeyPackage) -> anyhow::Result<()> {
 /// `OpenMlsRustCrypto`'s ChaCha20-Poly1305 HPKE-open on an unvalidated suite.
 pub fn gate_inbound_welcome(welcome: &Welcome) -> anyhow::Result<()> {
     gate_inbound_mls_suite(welcome_suite_u16(welcome)?)
+}
+
+/// Every algorithm a targeted message needs, taken from the group's ciphersuite (never from an
+/// inline choice): the hash behind `ciphertext_hash` and the KDF, the AEAD that protects the sender
+/// authentication data, the signature scheme, the HPKE triple, and the derived lengths `KDF.Nh`,
+/// `AEAD.Nk` and `AEAD.Nn`. Produced only by [`targeted_message_suite`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetedSuite {
+    pub ciphersuite: Ciphersuite,
+    pub hash: HashType,
+    pub aead: AeadType,
+    pub signature: SignatureScheme,
+    pub hpke_kem: HpkeKemType,
+    pub hpke_kdf: HpkeKdfType,
+    pub hpke_aead: HpkeAeadType,
+    /// `KDF.Nh`: the length of the MLS-Exporter outputs and of the ciphertext sample.
+    pub kdf_nh: usize,
+    /// `AEAD.Nk`.
+    pub aead_nk: usize,
+    /// `AEAD.Nn`.
+    pub aead_nn: usize,
+}
+
+/// **The targeted-message suite seam.** Runs the same accept-gate as every other inbound MLS
+/// object, then reads each algorithm from the ciphersuite. A suite added to the accepted set later
+/// flows through here with no change to the targeted-message code. WHY: INV-CRYPTO-AGILITY-001.
+pub fn targeted_message_suite(ciphersuite: Ciphersuite) -> anyhow::Result<TargetedSuite> {
+    gate_inbound_mls_suite(u16::from(ciphersuite))?;
+    Ok(TargetedSuite {
+        ciphersuite,
+        hash: ciphersuite.hash_algorithm(),
+        aead: ciphersuite.aead_algorithm(),
+        signature: ciphersuite.signature_algorithm(),
+        hpke_kem: ciphersuite.hpke_kem_algorithm(),
+        hpke_kdf: ciphersuite.hpke_kdf_algorithm(),
+        hpke_aead: ciphersuite.hpke_aead_algorithm(),
+        kdf_nh: ciphersuite.hash_length(),
+        aead_nk: ciphersuite.aead_key_length(),
+        aead_nn: ciphersuite.aead_nonce_length(),
+    })
 }
 
 #[cfg(test)]

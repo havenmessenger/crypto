@@ -28,6 +28,7 @@ this crate encrypts content, not envelope metadata; see [`THREAT_MODEL.md`](THRE
 | `mimi` | MIMI-over-MLS integration: group operations mirrored for the federation/interop surface, plus AppSync capability negotiation. |
 | `mime` | A fail-closed, depth-capped, never-panics parser for decrypted inner-MIME payloads (untrusted input), and an RFC-3156 §4 PGP/MIME envelope + full outer-message builder. |
 | `secret_store` | A handle-based, `Zeroize`-backed session secret custodian - the caller hands in an already-derived root key once and receives an opaque handle; the raw key never crosses back out. |
+| `mls::targeted` | MLS targeted messages (`draft-ietf-mls-targeted-messages-01`): a message from one group member to exactly one other, HPKE in PSK mode with an exporter-derived PSK, signed by the sender's leaf, in a versioned envelope. See [`TARGETED_MESSAGES.md`](TARGETED_MESSAGES.md). |
 | `suite_policy` | The crypto-agility seam: the single place that names which ciphersuite/algorithm this crate *generates* with, and which inbound MLS ciphersuites it *accepts* - so a future suite (e.g. post-quantum) is a change here, not a scattered wire-format hunt. |
 
 ## Enforcement direction

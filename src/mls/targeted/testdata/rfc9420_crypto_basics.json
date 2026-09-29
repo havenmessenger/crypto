@@ -1,0 +1,56 @@
+{
+ "source": "https://github.com/mlswg/mls-implementations/blob/main/test-vectors/crypto-basics.json (RFC 9420 crypto-basics test vectors; only the expand_with_label and sign_with_label entries of the cipher suites this library's provider implements)",
+ "vectors": [
+  {
+   "cipher_suite": 1,
+   "expand_with_label": {
+    "context": "2ff8c1f9d9c1248f82e372ddb5791c771695e01882abca6a64097bd2f04c971f",
+    "label": "ExpandWithLabel",
+    "length": 16,
+    "out": "c1e8eb360391526c0c64039f13e0c5b1",
+    "secret": "1499360a561335f4ef51d0a1b0d586900dc8007ae405b1ab79bf4207bb3d67e4"
+   },
+   "sign_with_label": {
+    "content": "cd289cc7ba2869f64f3c32ffd133f500d17abace919a5ffe7faa974200d81932",
+    "label": "SignWithLabel",
+    "priv": "a2f640dd5005fcad6adb8e9bd8b60d70946bb802e1e788307929fdac81e1ec74",
+    "pub": "85600e54e5c2919ccbd0742126e5d837cf7a2ba50d75a69b3f35dcfe4a50ffe2",
+    "signature": "996bd223ddb4d55a2b57d85cb2944f21facc95696053ddf66d590060fdc719f4a26c6212ce605414e0d5e66a55921dd99d11122218c35bc23408b0076e8bc40b"
+   }
+  },
+  {
+   "cipher_suite": 2,
+   "expand_with_label": {
+    "context": "453c420d63ecb1a8da89d3569770c42bad572864f3709d1e9dd19a0961cbf5e1",
+    "label": "ExpandWithLabel",
+    "length": 16,
+    "out": "5710680c556304f4aec67aab4abbc1b1",
+    "secret": "194d4e81c3f9fcfbc40e2cf3f5b104d0f51e71b5a7f1e4ddd70cc8d4a3620e5f"
+   },
+   "sign_with_label": {
+    "content": "a0dda617ce4685d764c762b11186b6d60ff8de85ff01eca2413bd4ecfd3b3a57",
+    "label": "SignWithLabel",
+    "priv": "207c472d3efaf6737a6f5ae14a3c33a139034865364a128bca5475c85cc02fe0",
+    "pub": "04448971fc06de011d780cf68fd27e2570322d04079f529c3deb48a2015fdd828162c570264e051b5856e8111171fb0341907173aefa665682c2549af982a31483",
+    "signature": "304402206042e397e1bb78951709790e3446b13bf17f9c641aaed92fb1768b5bc99dd98402202465153d91dd79e808286088768d8ed150381f3675498d6e150ae713be43387b"
+   }
+  },
+  {
+   "cipher_suite": 3,
+   "expand_with_label": {
+    "context": "2e07148f4340c62a55e7608c20d73fddf1f3b8dafb2c7ef24eceb70e136c0d8c",
+    "label": "ExpandWithLabel",
+    "length": 32,
+    "out": "1df5ba7996a34f75d717916a094a14083c03a75e80f0330a8095f5f11cfe1e1f",
+    "secret": "55aa3ae5242564782567ce097beafe19510230660008b2cc064a78387fa16f36"
+   },
+   "sign_with_label": {
+    "content": "df308cf2dbf471edf2c29d30e3daf161b5b87d350ee3b2c715c298ec3d10d432",
+    "label": "SignWithLabel",
+    "priv": "4e312160ee4981358db479aa877412847abc7f7054b5605511256c395404d054",
+    "pub": "18275f892ee0ca6f4687ff26c990776387502646ff658c3f572b324faecb05c5",
+    "signature": "4f56851c2c47f5115a61ff0ab6121b4a4732d4e94805fc7135a5132f87d5ca5f1dc7408816c1ea4f25887725cf5914b48c427a52cabcfeb746a2b8a12e821f08"
+   }
+  }
+ ]
+}
