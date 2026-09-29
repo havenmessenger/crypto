@@ -33,7 +33,7 @@ use openmls::prelude::{LeafNodeIndex, MlsGroup};
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::signatures::Signer;
 use openmls_traits::OpenMlsProvider;
-use tls_codec::{Deserialize, VLBytes};
+use tls_codec::{Deserialize, SecretVLBytes, Serialize, VLBytes};
 use zeroize::Zeroizing;
 
 use crate::mls::MAX_MLS_WIRE_BYTES;
@@ -219,9 +219,9 @@ pub fn seal<P: OpenMlsProvider>(
 
     // Sized once so the buffer never reallocates and leaves an unwiped copy behind.
     let mut content = Zeroizing::new(Vec::with_capacity(content_len + 8));
-    content.extend_from_slice(
-        &to_bytes(&VLBytes::new(application_data.to_vec())).ok_or(SealError::Serialize)?,
-    );
+    SecretVLBytes::new(application_data.to_vec())
+        .tls_serialize(&mut *content)
+        .map_err(|_| SealError::Serialize)?;
     let padded_len = content.len() + padding_len;
     content.resize(padded_len, 0);
     seal_content(
@@ -480,7 +480,8 @@ pub fn open<P: OpenMlsProvider>(
     let content = decrypt_content(provider, group, &suite, &secrets, &message, &sender_auth)?;
 
     let mut rest: &[u8] = &content;
-    let application_data = VLBytes::tls_deserialize(&mut rest).map_err(|_| OpenError::Malformed)?;
+    let application_data =
+        SecretVLBytes::tls_deserialize(&mut rest).map_err(|_| OpenError::Malformed)?;
     if rest.iter().any(|byte| *byte != 0) {
         return Err(OpenError::Padding);
     }
