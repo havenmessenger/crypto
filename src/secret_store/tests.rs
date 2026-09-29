@@ -616,3 +616,92 @@ fn seal_ops_fail_closed_after_lock() {
         Err(SecretStoreError::NoSuchSession)
     ));
 }
+
+// ── seal_root_for_session: a held root bound to a further key without leaving the custodian ─────
+
+fn root_c() -> Vec<u8> {
+    (64u8..96).collect()
+}
+
+/// Open `wire` exactly the way the cipher-store derivation does, without going through this module.
+fn manual_open_cipher_store_blob(
+    root: &[u8],
+    blob_key_name: &str,
+    wire: Vec<u8>,
+) -> Option<Vec<u8>> {
+    let cs_root = crate::crypto::hkdf_sha256(
+        root.to_vec(),
+        Vec::new(),
+        b"haven-cipher-store-root".to_vec(),
+        32,
+    )
+    .ok()?;
+    let info = format!("haven-cipher-store-blob:{blob_key_name}");
+    let blob_key = crate::crypto::hkdf_sha256(cs_root, Vec::new(), info.into_bytes(), 32).ok()?;
+    crate::crypto::aes_gcm_256_open(blob_key, wire).ok()
+}
+
+#[test]
+fn a_held_root_sealed_for_another_session_opens_there_as_prefix_then_root() {
+    let held = unlock(root_a()).unwrap();
+    let recipient = unlock(root_b()).unwrap();
+    let sealed = seal_root_for_session(held, recipient, "device_login", b"prefix").expect("seals");
+    let mut expected = b"prefix".to_vec();
+    expected.extend_from_slice(&root_a());
+    assert_eq!(
+        decrypt_cipher_store_blob(recipient, "device_login", sealed.clone()).expect("opens"),
+        expected
+    );
+    // The same bytes open under an independent derivation from the recipient's key.
+    assert_eq!(
+        manual_open_cipher_store_blob(&root_b(), "device_login", sealed)
+            .expect("opens independently"),
+        expected
+    );
+    lock(held);
+    lock(recipient);
+}
+
+#[test]
+fn only_the_recipient_opens_a_sealed_root() {
+    let held = unlock(root_a()).unwrap();
+    let recipient = unlock(root_b()).unwrap();
+    let other = unlock(root_c()).unwrap();
+    let sealed = seal_root_for_session(held, recipient, "device_login", b"p").expect("seals");
+    assert!(decrypt_cipher_store_blob(other, "device_login", sealed.clone()).is_err());
+    assert!(decrypt_cipher_store_blob(held, "device_login", sealed.clone()).is_err());
+    assert!(decrypt_cipher_store_blob(recipient, "another_blob", sealed.clone()).is_err());
+    assert!(manual_open_cipher_store_blob(&root_c(), "device_login", sealed).is_none());
+    lock(held);
+    lock(recipient);
+    lock(other);
+}
+
+#[test]
+fn sealing_a_root_needs_both_sessions_to_be_held() {
+    let held = unlock(root_a()).unwrap();
+    let recipient = unlock(root_b()).unwrap();
+    lock(recipient);
+    assert!(matches!(
+        seal_root_for_session(held, recipient, "device_login", b"p"),
+        Err(SecretStoreError::NoSuchSession)
+    ));
+    let recipient = unlock(root_b()).unwrap();
+    lock(held);
+    assert!(matches!(
+        seal_root_for_session(held, recipient, "device_login", b"p"),
+        Err(SecretStoreError::NoSuchSession)
+    ));
+    lock(recipient);
+}
+
+#[test]
+fn a_root_sealed_for_its_own_session_opens_there() {
+    let held = unlock(root_a()).unwrap();
+    let sealed = seal_root_for_session(held, held, "device_login", b"").expect("seals");
+    assert_eq!(
+        decrypt_cipher_store_blob(held, "device_login", sealed).expect("opens"),
+        root_a()
+    );
+    lock(held);
+}

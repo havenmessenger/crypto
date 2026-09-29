@@ -358,6 +358,32 @@ pub fn seal_cipher_store_blob(
     seal_with_root(&cs_root, cipher_store_blob_info(blob_key_name), plaintext)
 }
 
+/// Seal session `held`'s root, after a caller-chosen `prefix`, as cipher-store blob `blob_key_name` of
+/// session `recipient`, returning only the ciphertext. The result is what [`seal_cipher_store_blob`]
+/// would produce for `recipient`, `blob_key_name` and the plaintext `prefix ‖ root`, so the recipient
+/// opens it with [`decrypt_cipher_store_blob`]; the root itself never leaves the custodian.
+///
+/// This is how a login already held here is bound to a further device key without the passphrase:
+/// the caller unlocks that key as `recipient` and keeps only the sealed result. Fails closed if either
+/// session is unknown.
+pub fn seal_root_for_session(
+    held: SessionId,
+    recipient: SessionId,
+    blob_key_name: &str,
+    prefix: &[u8],
+) -> Result<Vec<u8>, SecretStoreError> {
+    let cs_root = cipher_store_root_clone(recipient)?;
+    let root = clone_root(held)?;
+    let mut framed = Zeroizing::new(Vec::with_capacity(prefix.len() + root.len()));
+    framed.extend_from_slice(prefix);
+    framed.extend_from_slice(&root);
+    seal_with_root(
+        &cs_root,
+        cipher_store_blob_info(blob_key_name),
+        std::mem::take(&mut *framed),
+    )
+}
+
 /// Batch sibling - the `cipher_store` login-hydration hot path (28-50 blobs): derive the
 /// `cipher_store` root ONCE, then open each blob. Per-item `Result` so one bad blob does not fail the
 /// batch.
