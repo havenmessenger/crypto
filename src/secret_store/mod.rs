@@ -301,16 +301,19 @@ fn open_with_root(
 /// ALL inside Rust. `info` + `plaintext` are consumed by the (owned-arg) primitives; `root` is borrowed.
 /// The subkey wipes on drop (`Zeroizing`). Seal is non-deterministic (random nonce) → the proof is
 /// round-trip (`open_with_root(seal_with_root(p)) == p`), NOT byte-equality of two seals.
+///
+/// The plaintext is borrowed, so a caller holding a secret plaintext keeps it in its own zeroizing
+/// buffer rather than handing over a copy that would be freed unwiped.
 fn seal_with_root(
     root: &[u8],
     info: Vec<u8>,
-    plaintext: Vec<u8>,
+    plaintext: &[u8],
 ) -> Result<Vec<u8>, SecretStoreError> {
     let subkey = Zeroizing::new(
         crate::crypto::hkdf_sha256(root.to_vec(), Vec::new(), info, 32)
             .map_err(|e| SecretStoreError::Crypto(e.to_string()))?,
     );
-    crate::crypto::aes_gcm_256_seal((*subkey).clone(), plaintext)
+    crate::crypto::aes_gcm_256_seal_slice(&subkey, plaintext)
         .map_err(|e| SecretStoreError::Crypto(e.to_string()))
 }
 
@@ -355,7 +358,9 @@ pub fn seal_cipher_store_blob(
     plaintext: Vec<u8>,
 ) -> Result<Vec<u8>, SecretStoreError> {
     let cs_root = cipher_store_root_clone(id)?;
-    seal_with_root(&cs_root, cipher_store_blob_info(blob_key_name), plaintext)
+    // Owned by this call, so it is wiped here once sealed rather than freed as it was handed in.
+    let plaintext = Zeroizing::new(plaintext);
+    seal_with_root(&cs_root, cipher_store_blob_info(blob_key_name), &plaintext)
 }
 
 /// Seal session `held`'s root, after a caller-chosen `prefix`, as cipher-store blob `blob_key_name` of
@@ -374,14 +379,12 @@ pub fn seal_root_for_session(
 ) -> Result<Vec<u8>, SecretStoreError> {
     let cs_root = cipher_store_root_clone(recipient)?;
     let root = clone_root(held)?;
+    // `framed` holds the root. It is lent to the seal, never moved out, so it stays in this zeroizing
+    // buffer and is wiped when it drops; a moved-out copy would be freed without being wiped.
     let mut framed = Zeroizing::new(Vec::with_capacity(prefix.len() + root.len()));
     framed.extend_from_slice(prefix);
     framed.extend_from_slice(&root);
-    seal_with_root(
-        &cs_root,
-        cipher_store_blob_info(blob_key_name),
-        std::mem::take(&mut *framed),
-    )
+    seal_with_root(&cs_root, cipher_store_blob_info(blob_key_name), &framed)
 }
 
 /// Batch sibling - the `cipher_store` login-hydration hot path (28-50 blobs): derive the

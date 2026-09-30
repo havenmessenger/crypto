@@ -140,7 +140,13 @@ pub fn pbkdf2_sha256_bytes(
 /// AES-GCM-256 **seal**: mint a fresh 96-bit nonce from `OsRng`, encrypt, return `nonce(12) ‖ ct ‖ tag`.
 pub fn aes_gcm_256_seal(key: Vec<u8>, plaintext: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let key = Key32::from_vec(key).map_err(|e| anyhow::anyhow!("aes_gcm_256_seal: {e}"))?;
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
+    aes_gcm_256_seal_slice(key.as_bytes(), &plaintext)
+}
+
+/// [`aes_gcm_256_seal`] over borrowed bytes. A caller whose plaintext is secret keeps it in its own
+/// zeroizing buffer and lends it here, so sealing makes no copy of it that is freed unwiped.
+pub(crate) fn aes_gcm_256_seal_slice(key: &[u8], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("aes_gcm_256_seal: key init failed: {e}"))?;
     let mut rng = rand::rngs::OsRng;
     let nonce = Aes256Gcm::generate_nonce(&mut rng);
@@ -148,7 +154,7 @@ pub fn aes_gcm_256_seal(key: Vec<u8>, plaintext: Vec<u8>) -> anyhow::Result<Vec<
         .encrypt(
             &nonce,
             Payload {
-                msg: &plaintext,
+                msg: plaintext,
                 aad: &[],
             },
         )
