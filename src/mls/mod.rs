@@ -6,6 +6,7 @@
 //! them here does not require this crate to depend on any binding layer.
 
 pub mod groups;
+pub mod inspection;
 pub mod targeted;
 
 use openmls::prelude::*;
