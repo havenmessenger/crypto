@@ -65,7 +65,7 @@ struct RetentionConfig {
     max_past_epochs: usize,
 }
 
-struct InspectionProvider(OpenMlsRustCrypto);
+pub(crate) struct InspectionProvider(pub(crate) OpenMlsRustCrypto);
 
 impl Drop for InspectionProvider {
     fn drop(&mut self) {

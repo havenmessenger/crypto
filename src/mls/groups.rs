@@ -203,6 +203,7 @@ pub fn create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Result<V
     // Today's default already resolves to 0x0001 (this is a strengthening, not a behavior
     // change) - see suite_policy.rs's module doc for WHY the seam exists.
     let group_config = MlsGroupCreateConfig::builder()
+        .max_past_epochs(crate::mls::retention::PAST_EPOCH_RETENTION)
         .ciphersuite(crate::suite_policy::mls_generation_suite())
         .wire_format_policy(WireFormatPolicy::default())
         .build();
@@ -343,7 +344,7 @@ pub fn decrypt_message(
     // Surface the sender openmls just authenticated, before into_content() consumes the
     // processed message. An application message does not change membership, so the sender's
     // leaf is present in the loaded group either side of this call.
-    let sender = crate::mls::authenticated_sender(&group, &processed_message)?;
+    let sender = crate::mls::authenticated_sender(&provider, &group, &processed_message)?;
 
     let content = match processed_message.into_content() {
         ProcessedMessageContent::ApplicationMessage(app_msg) => app_msg.into_bytes(),
@@ -1013,6 +1014,7 @@ pub fn process_welcome(
     }
 
     let mls_group_config = MlsGroupJoinConfig::builder()
+        .max_past_epochs(crate::mls::retention::PAST_EPOCH_RETENTION)
         .wire_format_policy(WireFormatPolicy::default())
         .build();
 
@@ -1085,7 +1087,7 @@ pub fn mls_process_commit(
     // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
     // consumes the processed message and before the commit changes membership - the committer is a
     // current member now and its leaf may move or be removed once the commit applies.
-    let sender = crate::mls::authenticated_sender(&group, &processed)?;
+    let sender = crate::mls::authenticated_sender(&provider, &group, &processed)?;
     match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged) => {
             group

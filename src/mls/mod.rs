@@ -7,6 +7,7 @@
 
 pub mod groups;
 pub mod inspection;
+pub mod retention;
 pub mod targeted;
 
 use openmls::prelude::*;
@@ -184,7 +185,10 @@ pub struct AuthenticatedSender {
 /// For a commit this MUST run on the pre-merge group: the committer is a current member before the
 /// commit applies, and reading the tree after a membership-changing merge would resolve a different
 /// leaf.
+/// A retained application's sender is resolved from its authenticated epoch's stored leaves;
+/// the current occupant of a reused leaf never supplies that historical signature key.
 pub(crate) fn authenticated_sender(
+    provider: &OpenMlsRustCrypto,
     group: &MlsGroup,
     processed: &ProcessedMessage,
 ) -> anyhow::Result<AuthenticatedSender> {
@@ -196,11 +200,19 @@ pub(crate) fn authenticated_sender(
             ))
         }
     };
-    let member = group.member_at(leaf_index).ok_or_else(|| {
-        anyhow::anyhow!("Authenticated sender leaf {leaf_index:?} is not in the tree")
-    })?;
+    let signature_key = if processed.epoch() < group.epoch() {
+        retention::historical_signature_key(provider, processed, leaf_index)?
+    } else {
+        let member = group.member_at(leaf_index).ok_or_else(|| {
+            anyhow::anyhow!("Authenticated sender leaf {leaf_index:?} is not in the tree")
+        })?;
+        if &member.credential != processed.credential() {
+            anyhow::bail!("Authenticated sender credential does not match the leaf");
+        }
+        member.signature_key
+    };
     Ok(AuthenticatedSender {
-        signature_key: member.signature_key,
+        signature_key,
         leaf_index: leaf_index.u32(),
         group_id: processed.group_id().as_slice().to_vec(),
         epoch: processed.epoch().as_u64(),

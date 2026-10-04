@@ -96,6 +96,25 @@ unwiped. Two residuals remain, disclosed rather than closed:
   `Zeroizing`-returning serialize method replacing the public derive) is a compat-breaking change
   to this crate's public API and remains an open, deferred decision.
 
+### Retained MLS epochs on device seizure
+
+| Capability | Retention behavior | Accepted residual and boundary |
+|---|---|---|
+| Access to unlocked memory or decrypted local group state, together with captured MLS ciphertext | Newly created/joined groups retain receive secrets for the current epoch and up to three prior epochs. Existing groups need the explicit retention migration; authenticated epoch transitions then accumulate and evict past secrets. | **Captured ciphertexts from up to three prior epochs can be readable on device seizure.** This widens the compromise window to tolerate late delivery. The bound is in epochs, not elapsed time; a quiet group can retain these secrets for a long time. Physical possession does not defeat a client's at-rest encryption. Sender-generation erasure can restrict individual ciphertext recovery. The bound concerns this active group's MLS secret store, not decrypted history, older backups, copied states or memory remnants. A new join gains no pre-join secrets; removed members gain no subsequent epochs from other devices' retention. |
+
+The effective persisted secret-store capacity is inspected separately from configuration and
+current occupancy. A configuration-only change does not resize existing storage. Migration
+raises both fields in an isolated provider, preserves current secrets and ratchets, and cannot
+recover erased keys. Larger coherent windows are not shrunk. Caller-owned persistence must
+atomically install the returned state and retain its pending recovery obligations. Backup and
+restore must preserve the actual retained secrets and capacity; this crate does not perform
+disk I/O or guarantee deletion of a caller's old snapshots.
+
+Inspection and migration wipe owned provider-storage values and opaque JSON secret payloads
+on drop. Upstream typed secret copies and JSON parsing/serialization allocations retain the
+existing zeroization residuals stated above; this is not a guarantee that every temporary
+allocation or upstream object is erased.
+
 ### A tampered legacy-format blob
 **Capability assumed:** the ability to modify a blob previously encrypted in this crate's
 legacy CTR+PKCS7 format (`crypto::aes_ctr_256_pkcs7_open`), before it is read back on a

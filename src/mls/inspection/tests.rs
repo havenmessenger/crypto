@@ -84,13 +84,13 @@ fn inspection_refuses_malformed_trailing_and_oversized_wire_and_invalid_local_st
 }
 
 #[test]
-fn created_and_welcome_installed_groups_have_zero_past_epoch_retention() {
+fn created_and_welcome_installed_groups_have_three_past_epoch_retention() {
     let (initial, joined, receiver, _, _) = pair();
     for state in [&initial, &joined, &receiver] {
         assert_eq!(
             inspect_group_state(state).unwrap().max_past_epochs,
-            0,
-            "past-epoch terminal dispositions must be revisited when retention changes"
+            3,
+            "creation and Welcome join use the shared receive-retention policy"
         );
     }
 }
@@ -135,7 +135,7 @@ fn public_messages_are_not_private_framing_and_configured_retention_is_read_from
         1,
         "retention is metadata, not a hardcoded zero"
     );
-    assert_eq!(inspect_group_state(&initial).unwrap().max_past_epochs, 0);
+    assert_eq!(inspect_group_state(&initial).unwrap().max_past_epochs, 3);
     let (_, welcome, public_commit) = add_member(configured, alice, package).unwrap();
     assert_eq!(inspect_private_message(&public_commit).unwrap(), None);
     let (welcome_wire, _): (Vec<u8>, Vec<u8>) = serde_json::from_slice(&welcome).unwrap();

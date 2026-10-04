@@ -103,6 +103,7 @@ pub fn mimi_create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Res
     let provider = OpenMlsRustCrypto::default();
 
     let group_config = MlsGroupCreateConfig::builder()
+        .max_past_epochs(crate::mls::retention::PAST_EPOCH_RETENTION)
         // Mimi-lane handshake messages (Commits/Proposals) are PublicMessage-framed on the wire so
         // a spec-conformant hub (which is never a group member) can read them, per
         // draft-ietf-mimi-protocol-06 §7.4. `MIXED_PLAINTEXT`, not `PURE_PLAINTEXT`: this only
@@ -185,6 +186,7 @@ pub fn mimi_create_group_with_external_senders(
         .map_err(|e| anyhow::anyhow!("Error building external_senders extension: {:?}", e))?;
 
     let group_config = MlsGroupCreateConfig::builder()
+        .max_past_epochs(crate::mls::retention::PAST_EPOCH_RETENTION)
         // Explicit generation-suite call, not openmls's default.
         .ciphersuite(crate::suite_policy::mls_generation_suite())
         // Same MIXED_PLAINTEXT rationale as mimi_create_group (see its own comment above).
@@ -825,7 +827,7 @@ pub fn mls_process_commit_appsync(
     // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
     // consumes the processed message. On the MIMI lane this is the sender an Add's authorization is
     // decided against, so it is the verified leaf key rather than any identity the payload claims.
-    let sender = crate::mls::authenticated_sender(&group, &processed)?;
+    let sender = crate::mls::authenticated_sender(&provider, &group, &processed)?;
     let mut roster_payload: Vec<u8> = Vec::new();
     match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged) => {
@@ -1245,6 +1247,7 @@ pub fn complete_welcome(
     }
 
     let mls_group_config = MlsGroupJoinConfig::builder()
+        .max_past_epochs(crate::mls::retention::PAST_EPOCH_RETENTION)
         // Same MIXED_PLAINTEXT rationale as mimi_create_group: a member who JOINS a mimi-lane group
         // must keep sending hub-readable (PublicMessage) handshake messages too, or the group's
         // hub-readability guarantee holds only until the first non-creator member commits.
