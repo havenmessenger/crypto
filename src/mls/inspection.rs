@@ -83,7 +83,7 @@ impl Drop for InspectionProvider {
 
 /// Read metadata from an existing serialized group without processing any message.
 /// The caller's bytes are borrowed unchanged; copied provider storage is wiped on drop.
-/// Missing context/configuration and inconsistent group identities are errors.
+/// Missing or corrupt context/configuration and inconsistent group identities are errors.
 pub fn inspect_group_state(bytes: &[u8]) -> anyhow::Result<GroupStateMetadata> {
     let mut state: super::GroupState = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("Invalid local MLS group state"))?;
@@ -96,25 +96,32 @@ pub fn inspect_group_state(bytes: &[u8]) -> anyhow::Result<GroupStateMetadata> {
         .write()
         .map_err(|_| anyhow::anyhow!("Local MLS inspection storage is unavailable"))? =
         std::mem::take(&mut state.storage_map).into_iter().collect();
-    let context: GroupContext = provider
-        .0
-        .storage()
-        .group_context(&group_id)?
-        .ok_or_else(|| anyhow::anyhow!("Local MLS group context is missing"))?;
-    if context.group_id() != &group_id {
-        anyhow::bail!("Local MLS group context belongs to another group");
-    }
-    let config: MlsGroupJoinConfig = provider
-        .0
-        .storage()
-        .mls_group_join_config(&group_id)?
-        .ok_or_else(|| anyhow::anyhow!("Local MLS group configuration is missing"))?;
-    Ok(GroupStateMetadata {
-        group_id: group_id.to_vec(),
-        epoch: context.epoch().as_u64(),
-        max_past_epochs: serde_json::from_value::<RetentionConfig>(serde_json::to_value(config)?)?
+    // Provider deserialization can panic on corrupt local metadata. Inspection is read-only,
+    // so reject that snapshot without exposing an unwind to the caller's receive loop.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let context: GroupContext = provider
+            .0
+            .storage()
+            .group_context(&group_id)?
+            .ok_or_else(|| anyhow::anyhow!("Local MLS group context is missing"))?;
+        if context.group_id() != &group_id {
+            anyhow::bail!("Local MLS group context belongs to another group");
+        }
+        let config: MlsGroupJoinConfig = provider
+            .0
+            .storage()
+            .mls_group_join_config(&group_id)?
+            .ok_or_else(|| anyhow::anyhow!("Local MLS group configuration is missing"))?;
+        Ok(GroupStateMetadata {
+            group_id: group_id.to_vec(),
+            epoch: context.epoch().as_u64(),
+            max_past_epochs: serde_json::from_value::<RetentionConfig>(serde_json::to_value(
+                config,
+            )?)?
             .max_past_epochs,
-    })
+        })
+    }))
+    .map_err(|_| anyhow::anyhow!("Invalid local MLS group metadata"))?
 }
 
 #[cfg(test)]
