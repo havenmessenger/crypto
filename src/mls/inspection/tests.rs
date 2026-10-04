@@ -141,3 +141,80 @@ fn public_messages_are_not_private_framing_and_configured_retention_is_read_from
     let (welcome_wire, _): (Vec<u8>, Vec<u8>) = serde_json::from_slice(&welcome).unwrap();
     assert_eq!(inspect_private_message(&welcome_wire).unwrap(), None);
 }
+
+#[test]
+fn the_wire_size_guard_runs_before_the_tls_decoder() {
+    let bytes = vec![0; crate::mls::MAX_MLS_WIRE_BYTES + 1];
+    let error = inspect_private_message(&bytes).unwrap_err();
+    assert!(
+        error.to_string().contains("MLS wire-input cap"),
+        "oversized framing must be refused by the pre-decode bound: {error}"
+    );
+}
+
+fn refuses_without_unwinding(bytes: &[u8]) {
+    let inspected = std::panic::catch_unwind(|| inspect_group_state(bytes));
+    assert!(
+        inspected.is_ok(),
+        "corrupt stored metadata must return an error, never unwind through the caller"
+    );
+    assert!(
+        inspected.unwrap().is_err(),
+        "incomplete or corrupt metadata cannot yield a group epoch"
+    );
+}
+
+#[test]
+fn missing_or_corrupt_context_and_configuration_are_errors_without_unwinding() {
+    let (_, joined, _, _, _) = pair();
+    for case in [
+        "missing-config",
+        "missing-context",
+        "corrupt-context",
+        "corrupt-config",
+    ] {
+        let mut state: super::super::GroupState = serde_json::from_slice(&joined).unwrap();
+        let provider = InspectionProvider(OpenMlsRustCrypto::default());
+        *provider.0.storage().values.write().unwrap() =
+            std::mem::take(&mut state.storage_map).into_iter().collect();
+        let id = GroupId::from_slice(&state.group_id);
+        match case {
+            "missing-config" => provider.0.storage().delete_group_config(&id).unwrap(),
+            "missing-context" => provider.0.storage().delete_context(&id).unwrap(),
+            corrupt => {
+                let label: &[u8] = if corrupt == "corrupt-config" {
+                    b"MlsGroupJoinConfig"
+                } else {
+                    b"GroupContext"
+                };
+                let mut values = provider.0.storage().values.write().unwrap();
+                let record = values
+                    .iter_mut()
+                    .find(|(key, _)| key.starts_with(label))
+                    .expect("the actual metadata entry");
+                *record.1 = b"malformed metadata".to_vec();
+            }
+        }
+        state.storage_map = provider
+            .0
+            .storage()
+            .values
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        refuses_without_unwinding(&serde_json::to_vec(&state).unwrap());
+    }
+}
+
+#[test]
+fn truncated_storage_maps_and_serialized_snapshots_are_errors_without_unwinding() {
+    let (_, joined, _, _, _) = pair();
+    for length in [0, joined.len() / 2, joined.len() - 1] {
+        refuses_without_unwinding(&joined[..length]);
+    }
+    let mut state: super::super::GroupState = serde_json::from_slice(&joined).unwrap();
+    state.storage_map.clear();
+    refuses_without_unwinding(&serde_json::to_vec(&state).unwrap());
+}
