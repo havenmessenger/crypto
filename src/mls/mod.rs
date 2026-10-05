@@ -7,7 +7,13 @@
 
 pub mod groups;
 pub mod inspection;
+pub mod pending;
 pub mod targeted;
+
+pub use pending::{
+    AbandonedGroupState, CommitAcceptance, ConfirmRefused, ConfirmedGroupState, PendingCommit,
+    PendingCommitError, PendingCommitSummary,
+};
 
 use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;

@@ -36,6 +36,7 @@ use std::mem;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::mls::pending::{open_group, staged, PendingCommit, WelcomeForm};
 use crate::mls::{make_lifetime, GroupState, IdentityBundle, MlsSigner};
 
 /// The removal semantics of a complete MLS `Proposal` wire value.
@@ -371,88 +372,47 @@ pub fn decrypt_message(
 /// adding to a group with other existing members MUST distribute commitBytes to every one of
 /// them (excluding the member just added) via `mls_process_commit`, or those members permanently
 /// desync onto a stale epoch.
+///
+/// **Deprecated for new callers:** this installs the successor before the group has accepted the
+/// commit. Use [`add_member_pending`], which returns a [`PendingCommit`] to confirm on acceptance.
 pub fn add_member(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     key_package_bytes: Vec<u8>,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    // Wrap both owned secret-bearing inputs on entry (see
-    // regenerate_key_package's comment). key_package_bytes is a public KeyPackage - not
-    // secret.
-    let group_state_bytes = Zeroizing::new(group_state_bytes);
-    let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
+    let (state, welcome, commit) =
+        add_member_pending(group_state_bytes, bundle_bytes, key_package_bytes)?.into_merged()?;
+    let welcome = welcome.ok_or_else(|| anyhow::anyhow!("Add commit produced no Welcome"))?;
+    Ok((state.to_vec(), welcome, commit))
+}
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
-
-    let provider = OpenMlsRustCrypto::default();
-
-    // Inject storage
-    {
-        let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut state.storage_map).into_iter().collect();
-    }
-
-    let signer = MlsSigner {
-        key: Zeroizing::new(mem::take(&mut identity.private_key)),
-        scheme: identity.signature_scheme,
-    };
-
-    let group_id = GroupId::from_slice(&state.group_id);
-    let mut group = MlsGroup::load(provider.storage(), &group_id)
-        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
-
-    // Deserialize the KeyPackage
+/// Stage the Add of one member. The Welcome is JSON `(welcome, ratchet_tree)`, as [`add_member`]
+/// returns it; the commit goes to every existing member once the group has accepted it.
+pub fn add_member_pending(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    key_package_bytes: Vec<u8>,
+) -> anyhow::Result<PendingCommit> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
     crate::mls::check_wire_size(&key_package_bytes, "add_member KeyPackage")?;
     let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes.as_slice())
         .map_err(|e| anyhow::anyhow!("Invalid KeyPackage: {:?}", e))?;
-
     let validated_kp = key_package
-        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .validate(opened.provider.crypto(), ProtocolVersion::Mls10)
         .map_err(|e| anyhow::anyhow!("KeyPackage validation failed: {:?}", e))?;
-
     // INV-MLS-002 explicit accept-gate: refuse a foreign-suite KeyPackage before openmls HPKE-seals
     // the Welcome to it. validate() above is signature-only (no AEAD); this gates the suite.
     crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
-
-    // Add member
-    let (commit, welcome, _group_info) = group
-        .add_members(&provider, &signer, &[validated_kp])
+    let (commit, welcome, _group_info) = opened
+        .group
+        .add_members(&opened.provider, &opened.signer, &[validated_kp])
         .map_err(|e| anyhow::anyhow!("Error adding member: {:?}", e))?;
-
-    // Merge pending commit
-    group
-        .merge_pending_commit(&provider)
-        .map_err(|e| anyhow::anyhow!("Error merging commit: {:?}", e))?;
-
-    // Export ratchet tree for Welcome processing
-    let ratchet_tree = group.export_ratchet_tree();
-    let ratchet_tree_bytes = ratchet_tree.tls_serialize_detached()?;
-
-    // Export updated storage
-    let new_storage_map = {
-        let values = provider.storage().values.read().unwrap();
-        values.clone().into_iter().collect()
-    };
-
-    let new_state = GroupState {
-        group_id: mem::take(&mut state.group_id),
-        storage_map: new_storage_map,
-    };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
-
-    // Serialize Welcome as MlsMessageOut (wrapper)
-    let welcome_bytes = welcome.tls_serialize_detached()?;
-
-    // Return: (new_group_state, welcome_bytes, ratchet_tree_bytes)
-    // Note: We combine welcome and ratchet_tree into a single payload for simplicity
-    let combined_welcome = serde_json::to_vec(&(welcome_bytes, ratchet_tree_bytes))?;
-    let commit_bytes = commit.tls_serialize_detached()?;
-
-    Ok((new_group_state.to_vec(), combined_welcome, commit_bytes))
+    staged(
+        opened,
+        &commit,
+        Some(WelcomeForm::WithRatchetTree(welcome)),
+        &[],
+    )
 }
 
 /// Upper bounds on `add_members_bulk`'s batch, generous for any real single-commit add and small
@@ -466,11 +426,28 @@ pub(crate) const MAX_BULK_AGGREGATE_BYTES: usize = 4 * 1024 * 1024;
 /// Returns (newGroupState, combinedWelcomeBytes, commitBytes) - same Welcome is valid for all
 /// added members. The Commit is additive (see `add_member`'s doc for the distribution
 /// obligation to any OTHER existing member of the group).
+///
+/// **Deprecated for new callers:** this installs the successor before the group has accepted the
+/// commit. Use [`add_members_bulk_pending`], which returns a [`PendingCommit`] to confirm on acceptance.
 pub fn add_members_bulk(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     key_packages_bytes: Vec<Vec<u8>>,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let (state, welcome, commit) =
+        add_members_bulk_pending(group_state_bytes, bundle_bytes, key_packages_bytes)?
+            .into_merged()?;
+    let welcome = welcome.ok_or_else(|| anyhow::anyhow!("Add commit produced no Welcome"))?;
+    Ok((state.to_vec(), welcome, commit))
+}
+
+/// Stage the Add of several members in one commit; one Welcome, JSON `(welcome, ratchet_tree)`,
+/// serves them all.
+pub fn add_members_bulk_pending(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    key_packages_bytes: Vec<Vec<u8>>,
+) -> anyhow::Result<PendingCommit> {
     if key_packages_bytes.len() > MAX_BULK_MEMBERS {
         anyhow::bail!(
             "add_members_bulk: {} KeyPackages exceeds the {MAX_BULK_MEMBERS}-member batch cap",
@@ -484,76 +461,30 @@ pub fn add_members_bulk(
              {MAX_BULK_AGGREGATE_BYTES}-byte batch cap"
         );
     }
-
-    // Wrap both owned secret-bearing inputs on entry (see
-    // regenerate_key_package's comment). key_packages_bytes are public KeyPackages - not
-    // secret.
-    let group_state_bytes = Zeroizing::new(group_state_bytes);
-    let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
-
-    let provider = OpenMlsRustCrypto::default();
-
-    {
-        let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut state.storage_map).into_iter().collect();
-    }
-
-    let signer = MlsSigner {
-        key: Zeroizing::new(mem::take(&mut identity.private_key)),
-        scheme: identity.signature_scheme,
-    };
-
-    let group_id = GroupId::from_slice(&state.group_id);
-    let mut group = MlsGroup::load(provider.storage(), &group_id)
-        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
-
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
     let mut validated_kps = Vec::with_capacity(key_packages_bytes.len());
     for kp_bytes in &key_packages_bytes {
         crate::mls::check_wire_size(kp_bytes, "add_members_bulk KeyPackage")?;
         let key_package = KeyPackageIn::tls_deserialize_exact(kp_bytes.as_slice())
             .map_err(|e| anyhow::anyhow!("Invalid KeyPackage: {:?}", e))?;
         let validated_kp = key_package
-            .validate(provider.crypto(), ProtocolVersion::Mls10)
+            .validate(opened.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| anyhow::anyhow!("KeyPackage validation failed: {:?}", e))?;
         // INV-MLS-002 explicit accept-gate: refuse any foreign-suite KeyPackage in the batch
         // before openmls HPKE-seals to it.
         crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
         validated_kps.push(validated_kp);
     }
-
-    let (commit, welcome, _group_info) = group
-        .add_members(&provider, &signer, &validated_kps)
+    let (commit, welcome, _group_info) = opened
+        .group
+        .add_members(&opened.provider, &opened.signer, &validated_kps)
         .map_err(|e| anyhow::anyhow!("Error adding members: {:?}", e))?;
-
-    group
-        .merge_pending_commit(&provider)
-        .map_err(|e| anyhow::anyhow!("Error merging commit: {:?}", e))?;
-
-    let ratchet_tree = group.export_ratchet_tree();
-    let ratchet_tree_bytes = ratchet_tree.tls_serialize_detached()?;
-
-    let new_storage_map = {
-        let values = provider.storage().values.read().unwrap();
-        values.clone().into_iter().collect()
-    };
-
-    let new_state = GroupState {
-        group_id: mem::take(&mut state.group_id),
-        storage_map: new_storage_map,
-    };
-    let new_group_state = crate::mls::zeroizing_json(&new_state)?;
-
-    let welcome_bytes = welcome.tls_serialize_detached()?;
-    let combined_welcome = serde_json::to_vec(&(welcome_bytes, ratchet_tree_bytes))?;
-    let commit_bytes = commit.tls_serialize_detached()?;
-
-    Ok((new_group_state.to_vec(), combined_welcome, commit_bytes))
+    staged(
+        opened,
+        &commit,
+        Some(WelcomeForm::WithRatchetTree(welcome)),
+        &[],
+    )
 }
 
 /// Remove a member from the MLS group by their credential identity (user_id string).
@@ -562,40 +493,30 @@ pub fn add_members_bulk(
 /// Returns (newGroupState, commitBytes). The Commit MUST be distributed to every remaining member
 /// (the removed member cannot process it, by construction) via `mls_process_commit`, or they
 /// permanently desync onto a stale epoch.
+///
+/// **Deprecated for new callers:** this installs the successor before the group has accepted the
+/// commit. Use [`remove_member_by_credential_pending`], which returns a [`PendingCommit`] to confirm on acceptance.
 pub fn remove_member_by_credential(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     credential_identity: String,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    // Wrap both owned secret-bearing inputs on entry (see
-    // regenerate_key_package's comment).
-    let group_state_bytes = Zeroizing::new(group_state_bytes);
-    let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
+    let (state, _, commit) =
+        remove_member_by_credential_pending(group_state_bytes, bundle_bytes, credential_identity)?
+            .into_merged()?;
+    Ok((state.to_vec(), commit))
+}
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
-
-    let provider = OpenMlsRustCrypto::default();
-
-    {
-        let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut state.storage_map).into_iter().collect();
-    }
-
-    let signer = MlsSigner {
-        key: Zeroizing::new(mem::take(&mut identity.private_key)),
-        scheme: identity.signature_scheme,
-    };
-
-    let group_id = GroupId::from_slice(&state.group_id);
-    let mut group = MlsGroup::load(provider.storage(), &group_id)
-        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
-
+/// Stage the Remove of the member whose credential identity is `credential_identity`.
+pub fn remove_member_by_credential_pending(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    credential_identity: String,
+) -> anyhow::Result<PendingCommit> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
     // Find the leaf index of the member with matching credential identity
-    let target_index = group
+    let target_index = opened
+        .group
         .members()
         .find(|m| {
             BasicCredential::try_from(m.credential.clone())
@@ -608,30 +529,11 @@ pub fn remove_member_by_credential(
                 credential_identity
             )
         })?;
-
-    let (commit, _welcome, _group_info) = group
-        .remove_members(&provider, &signer, &[target_index])
+    let (commit, _welcome, _group_info) = opened
+        .group
+        .remove_members(&opened.provider, &opened.signer, &[target_index])
         .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
-
-    group
-        .merge_pending_commit(&provider)
-        .map_err(|e| anyhow::anyhow!("Error merging remove commit: {:?}", e))?;
-
-    let new_storage_map = {
-        let values = provider.storage().values.read().unwrap();
-        values.clone().into_iter().collect()
-    };
-
-    let new_state = GroupState {
-        group_id: mem::take(&mut state.group_id),
-        storage_map: new_storage_map,
-    };
-
-    let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((
-        crate::mls::zeroizing_json(&new_state)?.to_vec(),
-        commit_bytes,
-    ))
+    staged(opened, &commit, None, &[])
 }
 
 /// Remove exactly one MLS leaf, refusing if the leaf no longer carries the
@@ -640,33 +542,36 @@ pub fn remove_member_by_credential(
 /// The expected key binds an operator's earlier indexed-tree selection to the
 /// state used to mint the Commit.  A changed or compacted tree therefore fails
 /// closed instead of removing whichever member later occupies that index.
+///
+/// **Deprecated for new callers:** this installs the successor before the group has accepted the
+/// commit. Use [`remove_member_by_leaf_index_pending`], which returns a [`PendingCommit`] to confirm on acceptance.
 pub fn remove_member_by_leaf_index(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     leaf_index: u32,
     expected_signature_key: String,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let group_state_bytes = Zeroizing::new(group_state_bytes);
-    let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
-    let provider = OpenMlsRustCrypto::default();
-    {
-        let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut state.storage_map).into_iter().collect();
-    }
-    let signer = MlsSigner {
-        key: Zeroizing::new(mem::take(&mut identity.private_key)),
-        scheme: identity.signature_scheme,
-    };
-    let group_id = GroupId::from_slice(&state.group_id);
-    let mut group = MlsGroup::load(provider.storage(), &group_id)
-        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+    let (state, _, commit) = remove_member_by_leaf_index_pending(
+        group_state_bytes,
+        bundle_bytes,
+        leaf_index,
+        expected_signature_key,
+    )?
+    .into_merged()?;
+    Ok((state.to_vec(), commit))
+}
+
+/// Stage the Remove of exactly one leaf, refusing if it no longer carries the expected signature key.
+pub fn remove_member_by_leaf_index_pending(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    leaf_index: u32,
+    expected_signature_key: String,
+) -> anyhow::Result<PendingCommit> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
     let target_index = LeafNodeIndex::new(leaf_index);
-    let target = group
+    let target = opened
+        .group
         .members()
         .find(|member| member.index == target_index)
         .ok_or_else(|| anyhow::anyhow!("MLS leaf index {leaf_index} is not occupied"))?;
@@ -674,25 +579,11 @@ pub fn remove_member_by_leaf_index(
         hex::encode_upper(&target.signature_key) == expected_signature_key.to_ascii_uppercase(),
         "MLS leaf index {leaf_index} does not carry the expected signature key"
     );
-    let (commit, _welcome, _group_info) = group
-        .remove_members(&provider, &signer, &[target_index])
+    let (commit, _welcome, _group_info) = opened
+        .group
+        .remove_members(&opened.provider, &opened.signer, &[target_index])
         .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
-    group
-        .merge_pending_commit(&provider)
-        .map_err(|e| anyhow::anyhow!("Error merging remove commit: {:?}", e))?;
-    let new_storage_map = {
-        let values = provider.storage().values.read().unwrap();
-        values.clone().into_iter().collect()
-    };
-    let new_state = GroupState {
-        group_id: mem::take(&mut state.group_id),
-        storage_map: new_storage_map,
-    };
-    let commit_bytes = commit.tls_serialize_detached()?;
-    Ok((
-        crate::mls::zeroizing_json(&new_state)?.to_vec(),
-        commit_bytes,
-    ))
+    staged(opened, &commit, None, &[])
 }
 
 /// List the current members of the group, one uppercase-hex signature key per leaf.
