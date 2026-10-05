@@ -892,3 +892,206 @@ fn a_record_whose_original_order_was_altered_is_refused() {
         PendingCommitError::Malformed("original bytes")
     );
 }
+
+#[test]
+fn debug_output_names_the_commit_and_never_shows_group_secrets() {
+    let m = mimi_pair("debug");
+    let (carol_kp, _) = mimi_kp("carol-debug");
+    let (dave_kp, _) = mimi_kp("dave-debug");
+    let mut pending =
+        mimi_add_member_commit_pending(m.alice_state.clone(), m.alice.clone(), carol_kp).unwrap();
+    let shown = format!("{pending:?}");
+    assert!(shown.starts_with("PendingCommit {"), "{shown}");
+    assert!(shown.contains(&hex::encode(pending.group_id())), "{shown}");
+    assert!(
+        shown.contains(&hex::encode(pending.commit_digest())),
+        "{shown}"
+    );
+    assert!(shown.contains(STAGED_FORMAT), "{shown}");
+    let Body::Staged { storage, .. } = &pending.body else {
+        unreachable!("a generator always stages");
+    };
+    assert!(!shown.contains("storage"), "{shown}");
+    // Values short enough to occur by chance inside a digest (an empty list is two bytes) prove
+    // nothing either way; secret material is longer.
+    for (_, value) in storage.storage_map.iter().filter(|(_, v)| v.len() >= 16) {
+        assert!(
+            !shown.contains(&hex::encode(value)),
+            "no storage value is shown"
+        );
+        assert!(
+            !shown.contains(&BASE64.encode(value)),
+            "no storage value is shown"
+        );
+    }
+    pending.bind_submission(SUBMISSION).unwrap();
+    let acceptance = accept(&pending);
+    let confirmed = pending.confirm(&m.alice_state, &acceptance).unwrap();
+    assert_eq!(
+        format!("{confirmed:?}"),
+        "ConfirmedGroupState(<group secrets>)"
+    );
+    let abandoned = mimi_add_member_commit_pending(m.alice_state, m.alice, dave_kp)
+        .unwrap()
+        .abandon()
+        .unwrap();
+    assert_eq!(
+        format!("{abandoned:?}"),
+        "AbandonedGroupState(<group secrets>)"
+    );
+}
+
+#[test]
+fn abandon_refuses_a_restored_state_that_still_holds_the_staged_commit() {
+    let m = mimi_pair("abandon-pending");
+    let (carol_kp, _) = mimi_kp("carol-abandon-pending");
+    let mut pending =
+        mimi_add_member_commit_pending(m.alice_state.clone(), m.alice, carol_kp).unwrap();
+    // Nothing undone: the "restored" state is the staged storage, same epoch, staged commit inside.
+    let Body::Staged {
+        restore: Some((set, _)),
+        ..
+    } = &mut pending.body
+    else {
+        unreachable!("a plaintext-lane generator records a restore set");
+    };
+    set.clear();
+    assert!(
+        pending.applies_to(&m.alice_state).unwrap(),
+        "the epoch binding alone still matches"
+    );
+    assert_eq!(
+        pending.abandon().unwrap_err(),
+        PendingCommitError::Malformed("restored state is not the predecessor")
+    );
+}
+
+#[test]
+fn abandon_refuses_a_restored_state_of_another_epoch() {
+    let m = mimi_pair("abandon-binding");
+    let (carol_kp, _) = mimi_kp("carol-abandon-binding");
+    let mut pending =
+        mimi_add_member_commit_pending(m.alice_state.clone(), m.alice, carol_kp).unwrap();
+    // The restored state holds no staged commit; only the binding it must match differs.
+    pending.predecessor_binding = [0; 32];
+    assert_eq!(
+        pending.abandon().unwrap_err(),
+        PendingCommitError::Malformed("restored state is not the predecessor")
+    );
+}
+
+/// A staged record, as JSON, with `edit` applied, read back.
+fn read_edited(
+    pending: &PendingCommit,
+    edit: impl Fn(&mut serde_json::Value),
+) -> Result<PendingCommit, PendingCommitError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&pending.to_bytes().unwrap()).unwrap();
+    edit(&mut value);
+    PendingCommit::from_bytes(&serde_json::to_vec(&value).unwrap())
+}
+
+#[test]
+fn a_staged_record_is_refused_when_either_its_epoch_or_its_binding_disagrees() {
+    let m = mimi_pair("staged-checks");
+    let (carol_kp, _) = mimi_kp("carol-staged-checks");
+    let pending = mimi_add_member_commit_pending(m.alice_state, m.alice, carol_kp).unwrap();
+    let epoch = pending.predecessor_epoch();
+    assert_eq!(
+        read_edited(&pending, |v| v["predecessor_epoch"] = (epoch + 1).into()).unwrap_err(),
+        PendingCommitError::Malformed("predecessor binding"),
+        "the epoch alone"
+    );
+    assert_eq!(
+        read_edited(&pending, |v| v["predecessor_binding"] =
+            "00".repeat(32).into())
+        .unwrap_err(),
+        PendingCommitError::Malformed("predecessor binding"),
+        "the binding alone"
+    );
+}
+
+#[test]
+fn a_restore_set_that_leaves_the_staged_commit_in_place_is_refused() {
+    let m = mimi_pair("restore-pending");
+    let (carol_kp, _) = mimi_kp("carol-restore-pending");
+    let pending = mimi_add_member_commit_pending(m.alice_state, m.alice, carol_kp).unwrap();
+    assert_eq!(
+        read_edited(&pending, |v| v["restore"] = serde_json::json!([])).unwrap_err(),
+        PendingCommitError::Malformed("restore set")
+    );
+}
+
+#[test]
+fn a_restore_set_that_restores_another_epoch_is_refused() {
+    let m = mimi_pair("restore-epoch");
+    let (carol_kp, _) = mimi_kp("carol-restore-epoch");
+    let (dave_kp, _) = mimi_kp("dave-restore-epoch");
+    let earlier = m.alice_state.clone();
+    let (later, _, _) =
+        crate::mimi::mimi_add_member_commit(earlier.clone(), m.alice.clone(), carol_kp).unwrap();
+    let pending = mimi_add_member_commit_pending(later, m.alice, dave_kp).unwrap();
+    // Every staged entry is "restored" to the earlier epoch's value: a loadable group with no staged
+    // commit, at the wrong epoch.
+    let earlier: GroupState = serde_json::from_slice(&earlier).unwrap();
+    let old: std::collections::HashMap<&Vec<u8>, &Vec<u8>> =
+        earlier.storage_map.iter().map(|(k, v)| (k, v)).collect();
+    let Body::Staged { storage, .. } = &pending.body else {
+        unreachable!("a generator always stages");
+    };
+    let restore: Vec<serde_json::Value> = storage
+        .storage_map
+        .iter()
+        .map(|(k, _)| serde_json::json!([BASE64.encode(k), old.get(k).map(|v| BASE64.encode(v))]))
+        .collect();
+    assert_eq!(
+        read_edited(&pending, |v| v["restore"] = restore.clone().into()).unwrap_err(),
+        PendingCommitError::Malformed("restore set")
+    );
+}
+
+#[test]
+fn a_legacy_record_is_refused_when_either_binding_disagrees() {
+    let m = mimi_pair("legacy-checks");
+    let (carol_kp, _) = mimi_kp("carol-legacy-checks");
+    let (successor, welcome, commit) =
+        crate::mimi::mimi_add_member_commit(m.alice_state.clone(), m.alice, carol_kp).unwrap();
+    let pending =
+        PendingCommit::from_legacy_merged(&m.alice_state, &successor, &commit, Some(&welcome))
+            .unwrap();
+    for field in ["predecessor_binding", "successor_binding"] {
+        assert_eq!(
+            read_edited(&pending, |v| v[field] = "00".repeat(32).into()).unwrap_err(),
+            PendingCommitError::Malformed("legacy binding"),
+            "{field} alone"
+        );
+    }
+}
+
+#[test]
+fn same_entries_needs_the_same_group_and_the_same_entries() {
+    let state = |group: &[u8], entries: &[(&[u8], &[u8])]| GroupState {
+        group_id: group.to_vec(),
+        storage_map: entries
+            .iter()
+            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .collect(),
+    };
+    let a = state(b"g", &[(b"k1", b"v1"), (b"k2", b"v2")]);
+    assert!(
+        same_entries(&a, &state(b"g", &[(b"k2", b"v2"), (b"k1", b"v1")])),
+        "any order"
+    );
+    assert!(
+        !same_entries(&a, &state(b"h", &[(b"k1", b"v1"), (b"k2", b"v2")])),
+        "other group"
+    );
+    assert!(
+        !same_entries(&a, &state(b"g", &[(b"k1", b"v1")])),
+        "an entry missing"
+    );
+    assert!(
+        !same_entries(&a, &state(b"g", &[(b"k1", b"v1"), (b"k2", b"v9")])),
+        "a value changed"
+    );
+}
