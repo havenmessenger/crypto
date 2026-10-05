@@ -159,12 +159,18 @@ pub struct ConfirmRefused {
     pub reason: PendingCommitError,
 }
 
+/// Storage entries staging wrote, each with the predecessor's value, or `None` where it had none.
+type RestoreSet = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
 enum Body {
-    /// The predecessor storage with OpenMLS's staged commit, plus the proposals this operation queued
-    /// for the commit to carry (removed again on abandon).
+    /// The predecessor storage with OpenMLS's staged commit, plus the proposals this operation
+    /// queued for the commit to carry. `restore` is present when the commit is a PublicMessage,
+    /// which consumes no key material: it holds the predecessor value
+    /// (`None` for absent) of every entry staging wrote, so abandoning returns the predecessor exactly.
     Staged {
         storage: GroupState,
         own_proposals: Vec<Vec<u8>>,
+        restore: Option<RestoreSet>,
     },
     /// A row written before pending commits existed: the merged successor and the predecessor it
     /// replaced.
@@ -342,7 +348,23 @@ impl PendingCommit {
         match &self.body {
             Body::Staged {
                 storage,
+                restore: Some(restore),
+                ..
+            } => {
+                let predecessor = reverted(storage, restore);
+                let (provider, group) = load_group(&predecessor)?;
+                wipe(&provider);
+                if group.pending_commit().is_some() || binding(&group) != self.predecessor_binding {
+                    return Err(PendingCommitError::Malformed(
+                        "restored state is not the predecessor",
+                    ));
+                }
+                Ok(AbandonedGroupState(encode_state(&predecessor)?))
+            }
+            Body::Staged {
+                storage,
                 own_proposals,
+                restore: None,
             } => {
                 let (provider, mut group) = load_group(storage)?;
                 group
@@ -373,15 +395,22 @@ impl PendingCommit {
 
     /// The durable form, written before the commit is first sent. It carries group secrets.
     pub fn to_bytes(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        let (format, state, predecessor_state, own_proposals) = match &self.body {
+        let (format, state, predecessor_state, own_proposals, restore) = match &self.body {
             Body::Staged {
                 storage,
                 own_proposals,
+                restore,
             } => (
                 STAGED_FORMAT,
                 entries_repr(storage),
                 None,
                 own_proposals.iter().map(|p| B64(p.clone())).collect(),
+                restore.as_ref().map(|entries| {
+                    entries
+                        .iter()
+                        .map(|(k, v)| (B64(k.clone()), v.clone().map(B64)))
+                        .collect()
+                }),
             ),
             Body::LegacyMerged {
                 predecessor,
@@ -391,6 +420,7 @@ impl PendingCommit {
                 entries_repr(successor),
                 Some(entries_repr(predecessor)),
                 Vec::new(),
+                None,
             ),
         };
         let repr = Repr {
@@ -406,6 +436,7 @@ impl PendingCommit {
             state,
             predecessor_state,
             own_proposals,
+            restore,
         };
         Ok(Zeroizing::new(serde_json::to_vec(&repr)?))
     }
@@ -446,6 +477,21 @@ impl PendingCommit {
                 {
                     return Err(PendingCommitError::Malformed("successor binding"));
                 }
+                let restore: Option<RestoreSet> = repr.restore.map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.0.clone(), v.map(|v| v.0.clone())))
+                        .collect()
+                });
+                if let Some(restore) = &restore {
+                    let (provider, predecessor) = load_group(&reverted(&storage, restore))?;
+                    wipe(&provider);
+                    if predecessor.pending_commit().is_some()
+                        || binding(&predecessor) != predecessor_binding
+                    {
+                        return Err(PendingCommitError::Malformed("restore set"));
+                    }
+                }
                 Body::Staged {
                     storage,
                     own_proposals: repr
@@ -453,9 +499,15 @@ impl PendingCommit {
                         .into_iter()
                         .map(|p| p.0.clone())
                         .collect(),
+                    restore,
                 }
             }
             LEGACY_FORMAT => {
+                if repr.restore.is_some() {
+                    return Err(PendingCommitError::Malformed(
+                        "a legacy record carries no restore set",
+                    ));
+                }
                 let predecessor = state_from_entries(
                     &group_id,
                     repr.predecessor_state.ok_or(PendingCommitError::Malformed(
@@ -559,6 +611,8 @@ pub(crate) struct OpenedGroup {
     pub(crate) group: MlsGroup,
     pub(crate) signer: MlsSigner,
     group_id: Vec<u8>,
+    /// The caller's state as given.
+    predecessor: GroupState,
 }
 
 /// Open `group_state_bytes` with the member's `bundle_bytes`, for a function that will stage a commit.
@@ -569,15 +623,12 @@ pub(crate) fn open_group(
     // Both inputs carry secrets; wrapping them on entry wipes them on every exit path.
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let bundle_bytes = Zeroizing::new(bundle_bytes);
-    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+    let state: GroupState = serde_json::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {e:?}"))?;
     let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid bundle: {e:?}"))?;
     let provider = OpenMlsRustCrypto::default();
-    {
-        let mut values = provider.storage().values.write().unwrap();
-        *values = mem::take(&mut state.storage_map).into_iter().collect();
-    }
+    *provider.storage().values.write().unwrap() = state.storage_map.iter().cloned().collect();
     let signer = MlsSigner {
         key: Zeroizing::new(mem::take(&mut identity.private_key)),
         scheme: identity.signature_scheme,
@@ -589,7 +640,8 @@ pub(crate) fn open_group(
         provider,
         group,
         signer,
-        group_id: mem::take(&mut state.group_id),
+        group_id: state.group_id.clone(),
+        predecessor: state,
     })
 }
 
@@ -614,6 +666,7 @@ pub(crate) fn staged(
         group,
         signer: _,
         group_id,
+        predecessor,
     } = opened;
     let staged_commit = group
         .pending_commit()
@@ -633,6 +686,22 @@ pub(crate) fn staged(
             .clone()
             .into_iter()
             .collect(),
+    };
+    let commit_bytes = commit.tls_serialize_detached()?;
+    // A PublicMessage commit consumed no key material, so abandoning it can return the predecessor
+    // exactly: record what staging wrote, and prove here that undoing it reproduces the predecessor.
+    let restore = match check_commit_framing(&commit_bytes, &group_id, group.epoch().as_u64())
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+    {
+        Some(_) => {
+            let restore = restore_set(&storage, &predecessor);
+            anyhow::ensure!(
+                same_entries(&reverted(&storage, &restore), &predecessor),
+                "staging removed a predecessor entry; the predecessor could not be restored exactly"
+            );
+            Some(restore)
+        }
+        None => None,
     };
 
     // The successor, computed in a throwaway provider for the summary and the Welcome's tree, and
@@ -668,13 +737,14 @@ pub(crate) fn staged(
         successor_binding,
         group_id,
         predecessor_epoch,
-        commit: commit.tls_serialize_detached()?,
+        commit: commit_bytes,
         welcome,
         submission: None,
         summary,
         body: Body::Staged {
             storage,
             own_proposals,
+            restore,
         },
     })
 }
@@ -692,6 +762,48 @@ fn load_group(state: &GroupState) -> Result<(OpenMlsRustCrypto, MlsGroup), Pendi
         .map_err(|_| PendingCommitError::Malformed("group state does not load"))?
         .ok_or(PendingCommitError::Malformed("group not in state"))?;
     Ok((provider, group))
+}
+
+/// Whether two states hold the same entries, in any order.
+fn same_entries(a: &GroupState, b: &GroupState) -> bool {
+    let set = |state: &GroupState| -> BTreeSet<(Vec<u8>, Vec<u8>)> {
+        state.storage_map.iter().cloned().collect()
+    };
+    a.group_id == b.group_id && set(a) == set(b)
+}
+
+/// What staging wrote: every entry of `staged` that differs from `predecessor`, with the
+/// predecessor's value, or `None` where the predecessor had no such entry.
+fn restore_set(staged: &GroupState, predecessor: &GroupState) -> RestoreSet {
+    let before: std::collections::HashMap<&[u8], &Vec<u8>> = predecessor
+        .storage_map
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v))
+        .collect();
+    staged
+        .storage_map
+        .iter()
+        .filter(|(k, v)| before.get(k.as_slice()) != Some(&v))
+        .map(|(k, _)| (k.clone(), before.get(k.as_slice()).map(|v| (*v).clone())))
+        .collect()
+}
+
+/// `staged` with `restore` undone.
+fn reverted(staged: &GroupState, restore: &[(Vec<u8>, Option<Vec<u8>>)]) -> GroupState {
+    let undo: std::collections::HashMap<&[u8], &Option<Vec<u8>>> =
+        restore.iter().map(|(k, v)| (k.as_slice(), v)).collect();
+    GroupState {
+        group_id: staged.group_id.clone(),
+        storage_map: staged
+            .storage_map
+            .iter()
+            .filter_map(|(k, v)| match undo.get(k.as_slice()) {
+                None => Some((k.clone(), v.clone())),
+                Some(Some(old)) => Some((k.clone(), old.clone())),
+                Some(None) => None,
+            })
+            .collect(),
+    }
 }
 
 fn export_state(
@@ -827,9 +939,10 @@ fn hex32(text: &str) -> Result<[u8; 32], PendingCommitError> {
 }
 
 fn entries_repr(state: &GroupState) -> Vec<(B64, B64)> {
-    state
-        .storage_map
-        .iter()
+    let mut entries: Vec<&(Vec<u8>, Vec<u8>)> = state.storage_map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
         .map(|(k, v)| (B64(k.clone()), B64(v.clone())))
         .collect()
 }
@@ -885,6 +998,7 @@ struct Repr {
     state: Vec<(B64, B64)>,
     predecessor_state: Option<Vec<(B64, B64)>>,
     own_proposals: Vec<B64>,
+    restore: Option<Vec<(B64, Option<B64>)>>,
 }
 
 #[derive(Serialize, Deserialize)]

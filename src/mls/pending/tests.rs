@@ -503,34 +503,68 @@ fn abandoning_a_plaintext_lane_commit_returns_the_predecessor_and_withdraws_its_
     )
     .unwrap();
     let abandoned = pending.abandon().unwrap().into_bytes().to_vec();
-    let (abandoned_set, predecessor) = (storage_set(&abandoned), storage_set(&m.alice_state));
-    // In a plaintext-handshake group nothing was consumed: every entry is the predecessor's. The one
-    // permitted difference is OpenMLS recording the withdrawn proposal's queue as present and empty.
-    let differing: Vec<_> = abandoned_set.symmetric_difference(&predecessor).collect();
-    assert!(
-        differing
-            .iter()
-            .all(|(key, value)| key.starts_with(b"ProposalQueueRefs")
-                && value.as_slice() == b"[]"
-                && abandoned_set.contains(&(key.clone(), value.clone()))),
-        "only an empty proposal queue may differ: {:?}",
-        differing
-            .iter()
-            .map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v.len()))
-            .collect::<Vec<_>>()
+    assert_eq!(
+        abandoned, m.alice_state,
+        "a PublicMessage commit consumed nothing: abandoning returns the predecessor, byte for byte"
     );
-    assert!(differing.len() <= 1);
-    let pending_again = mimi_add_member_commit_pending(
-        m.alice_state.clone(),
-        m.alice.clone(),
-        mimi_kp("x-abandon").0,
-    )
-    .unwrap();
-    assert!(
-        pending_again.applies_to(&abandoned).unwrap(),
-        "the same epoch, by binding"
-    );
-    assert_eq!(signature_keys(&abandoned), signature_keys(&m.alice_state));
+}
+
+#[test]
+fn every_plaintext_lane_generator_abandons_to_the_exact_predecessor() {
+    let m = mimi_pair("exact");
+    let (carol_kp, _) = mimi_kp("carol-exact");
+    let bob_leaf = list_members_with_indices(m.alice_state.clone())
+        .unwrap()
+        .into_iter()
+        .find(|member| member.credential_identity == b"bob-exact@as.test")
+        .unwrap();
+    let (s, a) = (&m.alice_state, &m.alice);
+    for pending in [
+        mimi_add_member_pending(s.clone(), a.clone(), carol_kp.clone()).unwrap(),
+        mimi_add_member_commit_pending(s.clone(), a.clone(), carol_kp.clone()).unwrap(),
+        mimi_remove_member_commit_pending(s.clone(), a.clone(), "bob-exact@as.test".into())
+            .unwrap(),
+        mimi_remove_member_commit_by_leaf_index_pending(
+            s.clone(),
+            a.clone(),
+            bob_leaf.leaf_index,
+            bob_leaf.signature_key,
+        )
+        .unwrap(),
+        mimi_add_members_bulk_commit_appsync_pending(s.clone(), a.clone(), vec![carol_kp], vec![4])
+            .unwrap(),
+        mimi_remove_member_commit_appsync_pending(
+            s.clone(),
+            a.clone(),
+            "bob-exact@as.test".into(),
+            vec![5],
+        )
+        .unwrap(),
+    ] {
+        let durable = PendingCommit::from_bytes(&pending.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            pending.abandon().unwrap().into_bytes().as_slice(),
+            s.as_slice()
+        );
+        assert_eq!(
+            durable.abandon().unwrap().into_bytes().as_slice(),
+            s.as_slice(),
+            "and after a restart"
+        );
+    }
+}
+
+#[test]
+fn one_pending_commit_always_confirms_to_the_same_bytes() {
+    let m = mimi_pair("stable");
+    let (carol_kp, _) = mimi_kp("carol-stable");
+    let mut pending =
+        mimi_add_member_commit_pending(m.alice_state.clone(), m.alice, carol_kp).unwrap();
+    pending.bind_submission(SUBMISSION).unwrap();
+    let durable = pending.to_bytes().unwrap();
+    let first = confirm(PendingCommit::from_bytes(&durable).unwrap(), &m.alice_state);
+    let second = confirm(PendingCommit::from_bytes(&durable).unwrap(), &m.alice_state);
+    assert_eq!(first, second);
 }
 
 #[test]
@@ -667,14 +701,14 @@ fn a_legacy_merged_row_recovers_confirms_and_abandons_to_its_predecessor() {
         .abandon()
         .unwrap()
         .into_bytes();
-    assert_eq!(storage_set(&abandoned), storage_set(&m.alice_state));
+    assert_eq!(abandoned.as_slice(), m.alice_state.as_slice());
 
     let acceptance = accept(&pending);
     let confirmed = pending
         .confirm(&m.alice_state, &acceptance)
         .unwrap()
         .into_bytes();
-    assert_eq!(storage_set(&confirmed), storage_set(&successor));
+    assert_eq!(confirmed.as_slice(), successor.as_slice());
     mls_process_commit(m.bob_state, m.bob, commit).unwrap();
 }
 

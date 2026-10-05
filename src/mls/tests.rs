@@ -1562,3 +1562,69 @@ fn decrypt_resolves_the_actual_sender_leaf_in_a_multi_member_group() {
     );
     assert_eq!(sender.leaf_index, 2, "carol is the third leaf");
 }
+
+/// The same group, encoded from a different in-memory entry order.
+fn reencoded_reversed<T: serde::Serialize + serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    entries: impl Fn(&mut T) -> &mut Vec<(Vec<u8>, Vec<u8>)>,
+) -> Vec<u8> {
+    let mut value: T = serde_json::from_slice(bytes).expect("decodes");
+    entries(&mut value).reverse();
+    serde_json::to_vec(&value).expect("encodes")
+}
+
+#[test]
+fn an_unchanged_group_state_encodes_to_the_same_bytes_whatever_its_entry_order() {
+    let now = now_secs();
+    let (_, _, alice) = generate_identity("alice-stable".into(), now).expect("fixture step");
+    let (_, bob_kp, _) = generate_identity("bob-stable".into(), now).expect("fixture step");
+    let state = create_group("stable-encoding".into(), alice.clone()).expect("fixture step");
+    let (state, _, _) = add_member(state, alice.clone(), bob_kp).expect("fixture step");
+    let parsed: GroupState = serde_json::from_slice(&state).expect("fixture step");
+    assert!(
+        parsed.storage_map.len() > 2,
+        "enough entries for order to matter"
+    );
+    assert_eq!(
+        reencoded_reversed::<GroupState>(&state, |s| &mut s.storage_map),
+        state,
+        "entries encode sorted by key, not in the order they were exported"
+    );
+    let alice_bundle_again = reencoded_reversed::<IdentityBundle>(&alice, |b| &mut b.storage_map);
+    assert_eq!(
+        alice_bundle_again, alice,
+        "an identity bundle encodes the same way"
+    );
+}
+
+#[test]
+fn a_group_state_in_the_earlier_unsorted_encoding_still_imports() {
+    let now = now_secs();
+    let (_, _, alice) = generate_identity("alice-unsorted".into(), now).expect("fixture step");
+    let (_, bob_kp, bob) = generate_identity("bob-unsorted".into(), now).expect("fixture step");
+    let state = create_group("unsorted-encoding".into(), alice.clone()).expect("fixture step");
+    let (state, welcome, _) = add_member(state, alice.clone(), bob_kp).expect("fixture step");
+    let (bob_state, _) = process_welcome(welcome, bob.clone()).expect("fixture step");
+
+    // The earlier encoding wrote entries in hash-map order; write them in reverse order directly.
+    let parsed: GroupState = serde_json::from_slice(&state).expect("fixture step");
+    let mut entries = parsed.storage_map.clone();
+    entries.reverse();
+    let unsorted = serde_json::to_vec(&serde_json::json!({
+        "group_id": parsed.group_id.clone(),
+        "storage_map": entries,
+    }))
+    .expect("fixture step");
+    assert_ne!(unsorted, state, "the fixture really is in another order");
+
+    let (after, ct) =
+        encrypt_message(unsorted, alice, b"still works".to_vec()).expect("fixture step");
+    let (_, pt, _) = decrypt_message(bob_state, bob, ct).expect("fixture step");
+    assert_eq!(pt, b"still works");
+    let after_parsed: GroupState = serde_json::from_slice(&after).expect("fixture step");
+    let keys: Vec<&Vec<u8>> = after_parsed.storage_map.iter().map(|(k, _)| k).collect();
+    assert!(
+        keys.windows(2).all(|w| w[0] < w[1]),
+        "and it is written back sorted"
+    );
+}

@@ -28,9 +28,13 @@ use zeroize::{Zeroize, Zeroizing};
 /// inside the per-op `OpenMlsRustCrypto` provider is out of this crate's control - it is a
 /// fresh, single-op provider (see groups.rs/mimi/mod.rs module docs), not a long-lived
 /// process, but openmls does not zeroize its own `MemoryStorage` internally.
+///
+/// `storage_map` always encodes sorted by key, whatever order it holds in memory, so one group
+/// state always encodes to the same bytes. Any order decodes.
 #[derive(Serialize, Deserialize)]
 pub struct GroupState {
     pub group_id: Vec<u8>,
+    #[serde(serialize_with = "sorted_entries")]
     pub storage_map: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -65,7 +69,9 @@ pub struct IdentityBundle {
     pub signature_scheme: SignatureScheme,
     pub public_key_bytes: Vec<u8>,
     pub user_id: String,
-    // Storage map from provider - needed for process_welcome to find KeyPackage
+    // Storage map from provider - needed for process_welcome to find KeyPackage. Encodes sorted by
+    // key, like `GroupState::storage_map`.
+    #[serde(serialize_with = "sorted_entries")]
     pub storage_map: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -117,6 +123,17 @@ pub const KP_NOT_BEFORE_MARGIN_SECS: u64 = 60 * 60; // 1 hour back
 /// `tls_deserialize_exact` call. 1 MiB is generous for any real KeyPackage/Welcome/Commit/
 /// application-ciphertext Haven produces (MLS objects are small relative to MIME).
 pub const MAX_MLS_WIRE_BYTES: usize = 1024 * 1024;
+
+/// Encode storage entries sorted by key. Entries come from a hash map whose iteration order changes
+/// between exports; sorting makes the encoding a function of the entries alone.
+fn sorted_entries<S: serde::Serializer>(
+    entries: &[(Vec<u8>, Vec<u8>)],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut sorted: Vec<&(Vec<u8>, Vec<u8>)> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted.serialize(serializer)
+}
 
 /// Serialize a key-bearing value (`GroupState`, `IdentityBundle`) into a self-wiping buffer.
 /// `serde_json::to_vec` alone returns a bare `Vec<u8>` holding the plaintext MLS ratchet
