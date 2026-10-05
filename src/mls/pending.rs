@@ -170,13 +170,15 @@ enum Body {
     Staged {
         storage: GroupState,
         own_proposals: Vec<Vec<u8>>,
-        restore: Option<RestoreSet>,
+        restore: Option<(RestoreSet, Original)>,
     },
     /// A row written before pending commits existed: the merged successor and the predecessor it
     /// replaced.
     LegacyMerged {
         predecessor: GroupState,
         successor: GroupState,
+        predecessor_original: Original,
+        successor_original: Original,
     },
 }
 
@@ -337,7 +339,11 @@ impl PendingCommit {
                 }
                 export_state(&provider, &self.group_id)
             }
-            Body::LegacyMerged { successor, .. } => encode_state(successor),
+            Body::LegacyMerged {
+                successor,
+                successor_original,
+                ..
+            } => original_bytes(successor_original, successor),
         }
     }
 
@@ -348,7 +354,7 @@ impl PendingCommit {
         match &self.body {
             Body::Staged {
                 storage,
-                restore: Some(restore),
+                restore: Some((restore, original)),
                 ..
             } => {
                 let predecessor = reverted(storage, restore);
@@ -359,7 +365,7 @@ impl PendingCommit {
                         "restored state is not the predecessor",
                     ));
                 }
-                Ok(AbandonedGroupState(encode_state(&predecessor)?))
+                Ok(AbandonedGroupState(original_bytes(original, &predecessor)?))
             }
             Body::Staged {
                 storage,
@@ -387,44 +393,21 @@ impl PendingCommit {
                     &self.group_id,
                 )?))
             }
-            Body::LegacyMerged { predecessor, .. } => {
-                Ok(AbandonedGroupState(encode_state(predecessor)?))
-            }
+            Body::LegacyMerged {
+                predecessor,
+                predecessor_original,
+                ..
+            } => Ok(AbandonedGroupState(original_bytes(
+                predecessor_original,
+                predecessor,
+            )?)),
         }
     }
 
     /// The durable form, written before the commit is first sent. It carries group secrets.
     pub fn to_bytes(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
-        let (format, state, predecessor_state, own_proposals, restore) = match &self.body {
-            Body::Staged {
-                storage,
-                own_proposals,
-                restore,
-            } => (
-                STAGED_FORMAT,
-                entries_repr(storage),
-                None,
-                own_proposals.iter().map(|p| B64(p.clone())).collect(),
-                restore.as_ref().map(|entries| {
-                    entries
-                        .iter()
-                        .map(|(k, v)| (B64(k.clone()), v.clone().map(B64)))
-                        .collect()
-                }),
-            ),
-            Body::LegacyMerged {
-                predecessor,
-                successor,
-            } => (
-                LEGACY_FORMAT,
-                entries_repr(successor),
-                Some(entries_repr(predecessor)),
-                Vec::new(),
-                None,
-            ),
-        };
-        let repr = Repr {
-            format: format.to_owned(),
+        let mut repr = Repr {
+            format: String::new(),
             group_id: B64(self.group_id.clone()),
             predecessor_epoch: self.predecessor_epoch,
             predecessor_binding: hex::encode(self.predecessor_binding),
@@ -433,112 +416,83 @@ impl PendingCommit {
             welcome: self.welcome.clone().map(B64),
             submission: self.submission.clone().map(B64),
             summary: SummaryRepr::from(&self.summary),
-            state,
-            predecessor_state,
-            own_proposals,
-            restore,
+            state: Vec::new(),
+            predecessor_state: None,
+            own_proposals: Vec::new(),
+            restore: None,
+            predecessor_original: None,
+            successor_original: None,
         };
+        match &self.body {
+            Body::Staged {
+                storage,
+                own_proposals,
+                restore,
+            } => {
+                STAGED_FORMAT.clone_into(&mut repr.format);
+                repr.state = entries_repr(storage);
+                repr.own_proposals = own_proposals.iter().map(|p| B64(p.clone())).collect();
+                if let Some((set, original)) = restore {
+                    repr.restore = Some(
+                        set.iter()
+                            .map(|(k, v)| (B64(k.clone()), v.clone().map(B64)))
+                            .collect(),
+                    );
+                    repr.predecessor_original = Some(OriginalRepr::from(original));
+                }
+            }
+            Body::LegacyMerged {
+                predecessor,
+                successor,
+                predecessor_original,
+                successor_original,
+            } => {
+                LEGACY_FORMAT.clone_into(&mut repr.format);
+                repr.state = entries_repr(successor);
+                repr.predecessor_state = Some(entries_repr(predecessor));
+                repr.predecessor_original = Some(OriginalRepr::from(predecessor_original));
+                repr.successor_original = Some(OriginalRepr::from(successor_original));
+            }
+        }
         Ok(Zeroizing::new(serde_json::to_vec(&repr)?))
     }
 
     /// Read a pending commit written by [`PendingCommit::to_bytes`]. Every binding is recomputed from
     /// the stored state; anything that does not agree is refused by name, never read as something else.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PendingCommitError> {
-        let repr: Repr = serde_json::from_slice(bytes)
+        let mut repr: Repr = serde_json::from_slice(bytes)
             .map_err(|_| PendingCommitError::Malformed("not a pending-commit record"))?;
-        let predecessor_binding = hex32(&repr.predecessor_binding)?;
-        let successor_binding = hex32(&repr.successor_binding)?;
+        let bindings = Bindings {
+            epoch: repr.predecessor_epoch,
+            predecessor: hex32(&repr.predecessor_binding)?,
+            successor: hex32(&repr.successor_binding)?,
+        };
         let group_id = repr.group_id.0.clone();
-        let summary = repr.summary.into_summary()?;
+        let parts = BodyParts {
+            state: mem::take(&mut repr.state),
+            predecessor_state: repr.predecessor_state.take(),
+            own_proposals: mem::take(&mut repr.own_proposals),
+            restore: repr.restore.take(),
+            predecessor_original: repr.predecessor_original.take(),
+            successor_original: repr.successor_original.take(),
+        };
         let body = match repr.format.as_str() {
-            STAGED_FORMAT => {
-                if repr.predecessor_state.is_some() {
-                    return Err(PendingCommitError::Malformed(
-                        "a staged record carries no predecessor",
-                    ));
-                }
-                let storage = state_from_entries(&group_id, repr.state);
-                let (_provider, group) = load_group(&storage)?;
-                let staged = group
-                    .pending_commit()
-                    .ok_or(PendingCommitError::Malformed("no staged commit"))?;
-                if group.epoch().as_u64() != repr.predecessor_epoch
-                    || binding(&group) != predecessor_binding
-                {
-                    return Err(PendingCommitError::Malformed("predecessor binding"));
-                }
-                let next = staged
-                    .epoch_authenticator()
-                    .ok_or(PendingCommitError::Malformed(
-                        "staged commit has no successor",
-                    ))?;
-                if binding_parts(&group_id, repr.predecessor_epoch + 1, next.as_slice())
-                    != successor_binding
-                {
-                    return Err(PendingCommitError::Malformed("successor binding"));
-                }
-                let restore: Option<RestoreSet> = repr.restore.map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|(k, v)| (k.0.clone(), v.map(|v| v.0.clone())))
-                        .collect()
-                });
-                if let Some(restore) = &restore {
-                    let (provider, predecessor) = load_group(&reverted(&storage, restore))?;
-                    wipe(&provider);
-                    if predecessor.pending_commit().is_some()
-                        || binding(&predecessor) != predecessor_binding
-                    {
-                        return Err(PendingCommitError::Malformed("restore set"));
-                    }
-                }
-                Body::Staged {
-                    storage,
-                    own_proposals: repr
-                        .own_proposals
-                        .into_iter()
-                        .map(|p| p.0.clone())
-                        .collect(),
-                    restore,
-                }
-            }
-            LEGACY_FORMAT => {
-                if repr.restore.is_some() {
-                    return Err(PendingCommitError::Malformed(
-                        "a legacy record carries no restore set",
-                    ));
-                }
-                let predecessor = state_from_entries(
-                    &group_id,
-                    repr.predecessor_state.ok_or(PendingCommitError::Malformed(
-                        "legacy record without predecessor",
-                    ))?,
-                );
-                let successor = state_from_entries(&group_id, repr.state);
-                if state_binding_of(&predecessor)? != predecessor_binding
-                    || state_binding_of(&successor)? != successor_binding
-                {
-                    return Err(PendingCommitError::Malformed("legacy binding"));
-                }
-                Body::LegacyMerged {
-                    predecessor,
-                    successor,
-                }
-            }
+            STAGED_FORMAT => staged_body(&group_id, &bindings, parts)?,
+            LEGACY_FORMAT => legacy_body(&group_id, &bindings, parts)?,
             _ => return Err(PendingCommitError::UnsupportedFormat),
         };
         let commit = repr.commit.0.clone();
-        check_commit_framing(&commit, &group_id, repr.predecessor_epoch)
+        check_commit_framing(&commit, &group_id, bindings.epoch)
             .map_err(|_| PendingCommitError::Malformed("commit framing"))?;
         Ok(Self {
             group_id,
-            predecessor_epoch: repr.predecessor_epoch,
-            predecessor_binding,
-            successor_binding,
+            predecessor_epoch: bindings.epoch,
+            predecessor_binding: bindings.predecessor,
+            successor_binding: bindings.successor,
             commit,
-            welcome: repr.welcome.map(|w| w.0.clone()),
-            submission: repr.submission.map(|s| s.0.clone()),
-            summary,
+            welcome: repr.welcome.take().map(|w| w.0.clone()),
+            submission: repr.submission.take().map(|s| s.0.clone()),
+            summary: repr.summary.into_summary()?,
             body,
         })
     }
@@ -556,6 +510,8 @@ impl PendingCommit {
         welcome: Option<&[u8]>,
     ) -> Result<Self, PendingCommitError> {
         use PendingCommitError::LegacyBindingInvalid as Invalid;
+        let predecessor_raw = predecessor;
+        let successor_raw = successor;
         let predecessor: GroupState =
             serde_json::from_slice(predecessor).map_err(|_| Invalid("predecessor state"))?;
         let successor: GroupState =
@@ -567,7 +523,7 @@ impl PendingCommit {
         let (_p, before) = load_group(&predecessor).map_err(|_| Invalid("predecessor state"))?;
         let (_s, after) = load_group(&successor).map_err(|_| Invalid("successor state"))?;
         let predecessor_epoch = before.epoch().as_u64();
-        if after.epoch().as_u64() != predecessor_epoch + 1 {
+        if predecessor_epoch.checked_add(1) != Some(after.epoch().as_u64()) {
             return Err(Invalid("successor is not the next epoch"));
         }
         let sender = check_commit_framing(commit, &group_id, predecessor_epoch)?;
@@ -587,6 +543,8 @@ impl PendingCommit {
             submission: None,
             summary,
             body: Body::LegacyMerged {
+                predecessor_original: Original::capture(predecessor_raw, &predecessor),
+                successor_original: Original::capture(successor_raw, &successor),
                 predecessor,
                 successor,
             },
@@ -605,14 +563,147 @@ impl PendingCommit {
 /// The older functions' result: successor state, Welcome when there is one, and the commit.
 pub(crate) type Merged = (Zeroizing<Vec<u8>>, Option<Vec<u8>>, Vec<u8>);
 
+/// What a durable record says its group, epoch and two epochs are.
+struct Bindings {
+    epoch: u64,
+    predecessor: [u8; 32],
+    successor: [u8; 32],
+}
+
+/// The state-bearing fields of a durable record, read by the reader of its format.
+struct BodyParts {
+    state: Vec<(B64, B64)>,
+    predecessor_state: Option<Vec<(B64, B64)>>,
+    own_proposals: Vec<B64>,
+    restore: Option<Vec<(B64, Option<B64>)>>,
+    predecessor_original: Option<OriginalRepr>,
+    successor_original: Option<OriginalRepr>,
+}
+
+fn staged_body(
+    group_id: &[u8],
+    bindings: &Bindings,
+    parts: BodyParts,
+) -> Result<Body, PendingCommitError> {
+    if parts.predecessor_state.is_some() {
+        return Err(PendingCommitError::Malformed(
+            "a staged record carries no predecessor",
+        ));
+    }
+    let storage = state_from_entries(group_id, parts.state);
+    let (_provider, group) = load_group(&storage)?;
+    let staged = group
+        .pending_commit()
+        .ok_or(PendingCommitError::Malformed("no staged commit"))?;
+    if group.epoch().as_u64() != bindings.epoch || binding(&group) != bindings.predecessor {
+        return Err(PendingCommitError::Malformed("predecessor binding"));
+    }
+    let next = staged
+        .epoch_authenticator()
+        .ok_or(PendingCommitError::Malformed(
+            "staged commit has no successor",
+        ))?;
+    let next_epoch = bindings
+        .epoch
+        .checked_add(1)
+        .ok_or(PendingCommitError::Malformed("epoch"))?;
+    if binding_parts(group_id, next_epoch, next.as_slice()) != bindings.successor {
+        return Err(PendingCommitError::Malformed("successor binding"));
+    }
+    if parts.successor_original.is_some() {
+        return Err(PendingCommitError::Malformed(
+            "a staged record carries no successor",
+        ));
+    }
+    let restore = match (parts.restore, parts.predecessor_original) {
+        (None, None) => None,
+        (Some(entries), Some(original)) => {
+            let set: RestoreSet = entries
+                .into_iter()
+                .map(|(k, v)| (k.0.clone(), v.map(|v| v.0.clone())))
+                .collect();
+            let original = original.into_original()?;
+            let predecessor = reverted(&storage, &set);
+            let (provider, loaded) = load_group(&predecessor)?;
+            wipe(&provider);
+            if loaded.pending_commit().is_some() || binding(&loaded) != bindings.predecessor {
+                return Err(PendingCommitError::Malformed("restore set"));
+            }
+            original_bytes(&original, &predecessor)?;
+            Some((set, original))
+        }
+        _ => {
+            return Err(PendingCommitError::Malformed(
+                "a restore set needs the predecessor's original bytes",
+            ))
+        }
+    };
+    Ok(Body::Staged {
+        storage,
+        own_proposals: parts
+            .own_proposals
+            .into_iter()
+            .map(|p| p.0.clone())
+            .collect(),
+        restore,
+    })
+}
+
+fn legacy_body(
+    group_id: &[u8],
+    bindings: &Bindings,
+    parts: BodyParts,
+) -> Result<Body, PendingCommitError> {
+    if parts.restore.is_some() {
+        return Err(PendingCommitError::Malformed(
+            "a legacy record carries no restore set",
+        ));
+    }
+    let predecessor_original = parts
+        .predecessor_original
+        .ok_or(PendingCommitError::Malformed(
+            "legacy record without originals",
+        ))?
+        .into_original()?;
+    let successor_original = parts
+        .successor_original
+        .ok_or(PendingCommitError::Malformed(
+            "legacy record without originals",
+        ))?
+        .into_original()?;
+    let predecessor = state_from_entries(
+        group_id,
+        parts
+            .predecessor_state
+            .ok_or(PendingCommitError::Malformed(
+                "legacy record without predecessor",
+            ))?,
+    );
+    let successor = state_from_entries(group_id, parts.state);
+    if state_binding_of(&predecessor)? != bindings.predecessor
+        || state_binding_of(&successor)? != bindings.successor
+    {
+        return Err(PendingCommitError::Malformed("legacy binding"));
+    }
+    original_bytes(&predecessor_original, &predecessor)?;
+    original_bytes(&successor_original, &successor)?;
+    Ok(Body::LegacyMerged {
+        predecessor,
+        successor,
+        predecessor_original,
+        successor_original,
+    })
+}
+
 /// A group opened for an outbound change: the provider holding its storage, the group, and the signer.
 pub(crate) struct OpenedGroup {
     pub(crate) provider: OpenMlsRustCrypto,
     pub(crate) group: MlsGroup,
     pub(crate) signer: MlsSigner,
     group_id: Vec<u8>,
-    /// The caller's state as given.
+    /// The caller's state as given, decoded and as the bytes it arrived in.
     predecessor: GroupState,
+    predecessor_raw: Zeroizing<Vec<u8>>,
 }
 
 /// Open `group_state_bytes` with the member's `bundle_bytes`, for a function that will stage a commit.
@@ -642,6 +733,7 @@ pub(crate) fn open_group(
         signer,
         group_id: state.group_id.clone(),
         predecessor: state,
+        predecessor_raw: group_state_bytes,
     })
 }
 
@@ -667,6 +759,7 @@ pub(crate) fn staged(
         signer: _,
         group_id,
         predecessor,
+        predecessor_raw,
     } = opened;
     let staged_commit = group
         .pending_commit()
@@ -675,7 +768,10 @@ pub(crate) fn staged(
         .epoch_authenticator()
         .ok_or_else(|| anyhow::anyhow!("staged commit has no successor epoch"))?;
     let predecessor_epoch = group.epoch().as_u64();
-    let successor_binding = binding_parts(&group_id, predecessor_epoch + 1, next.as_slice());
+    let next_epoch = predecessor_epoch
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("epoch overflow"))?;
+    let successor_binding = binding_parts(&group_id, next_epoch, next.as_slice());
     let storage = GroupState {
         group_id: group_id.clone(),
         storage_map: provider
@@ -699,7 +795,7 @@ pub(crate) fn staged(
                 same_entries(&reverted(&storage, &restore), &predecessor),
                 "staging removed a predecessor entry; the predecessor could not be restored exactly"
             );
-            Some(restore)
+            Some((restore, Original::capture(&predecessor_raw, &predecessor)))
         }
         None => None,
     };
@@ -747,6 +843,114 @@ pub(crate) fn staged(
             restore,
         },
     })
+}
+
+/// How to hand a caller's state back exactly as it was given: the digest of its bytes, and either the
+/// order its entries were written in, when writing them in that order reproduces the bytes, or the
+/// bytes themselves. States written before encoding was sorted keep their own order this way.
+struct Original {
+    digest: [u8; 32],
+    order: Option<Vec<u32>>,
+    raw: Option<Vec<u8>>,
+}
+
+impl Drop for Original {
+    fn drop(&mut self) {
+        if let Some(raw) = &mut self.raw {
+            raw.zeroize();
+        }
+    }
+}
+
+impl Original {
+    fn capture(raw: &[u8], state: &GroupState) -> Self {
+        let digest = Sha256::digest(raw).into();
+        let mut keys: Vec<&[u8]> = state
+            .storage_map
+            .iter()
+            .map(|(k, _)| k.as_slice())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let order: Option<Vec<u32>> = (keys.len() == state.storage_map.len())
+            .then(|| {
+                state
+                    .storage_map
+                    .iter()
+                    .map(|(k, _)| {
+                        keys.binary_search(&k.as_slice())
+                            .ok()
+                            .and_then(|i| u32::try_from(i).ok())
+                    })
+                    .collect()
+            })
+            .flatten();
+        let reproduces = encode_in_order(&state.group_id, &state.storage_map)
+            .is_ok_and(|bytes| bytes.as_slice() == raw);
+        match order {
+            Some(order) if reproduces => Self {
+                digest,
+                order: Some(order),
+                raw: None,
+            },
+            _ => Self {
+                digest,
+                order: None,
+                raw: Some(raw.to_vec()),
+            },
+        }
+    }
+}
+
+/// The original bytes of `state`, whose entries are the original's in any order. Refused unless they
+/// hash to the recorded digest.
+fn original_bytes(
+    original: &Original,
+    state: &GroupState,
+) -> Result<Zeroizing<Vec<u8>>, PendingCommitError> {
+    let bytes = match (&original.raw, &original.order) {
+        (Some(raw), _) => Zeroizing::new(raw.clone()),
+        (None, Some(order)) => {
+            let mut sorted: Vec<&(Vec<u8>, Vec<u8>)> = state.storage_map.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            if order.len() != sorted.len() {
+                return Err(PendingCommitError::Malformed("original order"));
+            }
+            let in_order = GroupState {
+                group_id: state.group_id.clone(),
+                storage_map: order
+                    .iter()
+                    .map(|&i| sorted.get(i as usize).map(|entry| (*entry).clone()))
+                    .collect::<Option<_>>()
+                    .ok_or(PendingCommitError::Malformed("original order"))?,
+            };
+            encode_in_order(&in_order.group_id, &in_order.storage_map)
+                .map_err(|_| PendingCommitError::Malformed("encode state"))?
+        }
+        (None, None) => return Err(PendingCommitError::Malformed("original")),
+    };
+    if <[u8; 32]>::from(Sha256::digest(bytes.as_slice())) != original.digest {
+        return Err(PendingCommitError::Malformed("original bytes"));
+    }
+    Ok(bytes)
+}
+
+/// A group state's encoding with its entries in the order given, as states were written before
+/// encoding was sorted.
+fn encode_in_order(
+    group_id: &[u8],
+    entries: &[(Vec<u8>, Vec<u8>)],
+) -> serde_json::Result<Zeroizing<Vec<u8>>> {
+    #[derive(Serialize)]
+    struct InOrder<'a> {
+        group_id: &'a [u8],
+        storage_map: &'a [(Vec<u8>, Vec<u8>)],
+    }
+    serde_json::to_vec(&InOrder {
+        group_id,
+        storage_map: entries,
+    })
+    .map(Zeroizing::new)
 }
 
 fn wipe(provider: &OpenMlsRustCrypto) {
@@ -999,6 +1203,8 @@ struct Repr {
     predecessor_state: Option<Vec<(B64, B64)>>,
     own_proposals: Vec<B64>,
     restore: Option<Vec<(B64, Option<B64>)>>,
+    predecessor_original: Option<OriginalRepr>,
+    successor_original: Option<OriginalRepr>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1017,6 +1223,37 @@ struct MemberRepr {
     leaf_index: u32,
     credential_identity: B64,
     signature_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OriginalRepr {
+    digest: String,
+    order: Option<Vec<u32>>,
+    raw: Option<B64>,
+}
+
+impl From<&Original> for OriginalRepr {
+    fn from(original: &Original) -> Self {
+        Self {
+            digest: hex::encode(original.digest),
+            order: original.order.clone(),
+            raw: original.raw.clone().map(B64),
+        }
+    }
+}
+
+impl OriginalRepr {
+    fn into_original(self) -> Result<Original, PendingCommitError> {
+        if self.order.is_some() == self.raw.is_some() {
+            return Err(PendingCommitError::Malformed("original"));
+        }
+        Ok(Original {
+            digest: hex32(&self.digest)?,
+            order: self.order,
+            raw: self.raw.map(|raw| raw.0.clone()),
+        })
+    }
 }
 
 impl From<&PendingCommitSummary> for SummaryRepr {
@@ -1043,7 +1280,7 @@ impl From<&PendingCommitSummary> for SummaryRepr {
 
 impl SummaryRepr {
     fn into_summary(self) -> Result<PendingCommitSummary, PendingCommitError> {
-        if self.to_epoch != self.from_epoch + 1 {
+        if self.from_epoch.checked_add(1) != Some(self.to_epoch) {
             return Err(PendingCommitError::Malformed("summary epochs"));
         }
         let list = |members: Vec<MemberRepr>| {

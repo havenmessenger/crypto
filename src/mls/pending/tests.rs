@@ -661,6 +661,13 @@ fn a_durable_record_that_does_not_agree_with_itself_is_refused_by_name() {
         edited(&|v| v["predecessor_epoch"] = 7.into()),
         PendingCommitError::Malformed(_)
     ));
+    assert!(matches!(
+        edited(&|v| {
+            v["predecessor_epoch"] = u64::MAX.into();
+            v["summary"]["from_epoch"] = u64::MAX.into();
+        }),
+        PendingCommitError::Malformed(_)
+    ));
     // The canonical predecessor's storage in place of the staged storage: no staged commit inside.
     let canonical: GroupState = serde_json::from_slice(&m.alice_state).unwrap();
     let entries: Vec<serde_json::Value> = canonical
@@ -755,5 +762,133 @@ fn a_legacy_row_whose_parts_do_not_belong_together_is_refused() {
     assert_eq!(
         refused(&m.alice_state, &successor, &application),
         "message is not a commit"
+    );
+}
+
+/// `state` as written before encoding was sorted: the same entries, in another order.
+fn unsorted(state: &[u8]) -> Vec<u8> {
+    let parsed: GroupState = serde_json::from_slice(state).unwrap();
+    let mut entries = parsed.storage_map.clone();
+    entries.reverse();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "group_id": parsed.group_id.clone(),
+        "storage_map": entries,
+    }))
+    .unwrap();
+    assert_ne!(bytes, state, "the fixture really is in another order");
+    bytes
+}
+
+/// `state` in a form no encoder of this crate writes: pretty-printed, entries reversed.
+fn noncanonical(state: &[u8]) -> Vec<u8> {
+    let parsed: GroupState = serde_json::from_slice(state).unwrap();
+    let mut entries = parsed.storage_map.clone();
+    entries.reverse();
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "group_id": parsed.group_id.clone(),
+        "storage_map": entries,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn an_unsorted_predecessor_abandons_to_its_original_bytes() {
+    let m = mimi_pair("r11");
+    let (carol_kp, _) = mimi_kp("carol-r11");
+    let bob_leaf = list_members_with_indices(m.alice_state.clone())
+        .unwrap()
+        .into_iter()
+        .find(|member| member.credential_identity == b"bob-r11@as.test")
+        .unwrap();
+    for original in [unsorted(&m.alice_state), noncanonical(&m.alice_state)] {
+        let (s, a) = (&original, &m.alice);
+        for pending in [
+            mimi_add_member_pending(s.clone(), a.clone(), carol_kp.clone()).unwrap(),
+            mimi_add_member_commit_pending(s.clone(), a.clone(), carol_kp.clone()).unwrap(),
+            mimi_remove_member_commit_pending(s.clone(), a.clone(), "bob-r11@as.test".into())
+                .unwrap(),
+            mimi_remove_member_commit_by_leaf_index_pending(
+                s.clone(),
+                a.clone(),
+                bob_leaf.leaf_index,
+                bob_leaf.signature_key.clone(),
+            )
+            .unwrap(),
+            mimi_add_members_bulk_commit_appsync_pending(
+                s.clone(),
+                a.clone(),
+                vec![carol_kp.clone()],
+                vec![6],
+            )
+            .unwrap(),
+            mimi_remove_member_commit_appsync_pending(
+                s.clone(),
+                a.clone(),
+                "bob-r11@as.test".into(),
+                vec![7],
+            )
+            .unwrap(),
+        ] {
+            assert!(
+                pending.applies_to(&m.alice_state).unwrap(),
+                "same epoch either way"
+            );
+            let durable = PendingCommit::from_bytes(&pending.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                pending.abandon().unwrap().into_bytes().as_slice(),
+                s.as_slice()
+            );
+            assert_eq!(
+                durable.abandon().unwrap().into_bytes().as_slice(),
+                s.as_slice(),
+                "and after a restart"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_legacy_row_with_unsorted_states_returns_their_original_bytes() {
+    let m = mimi_pair("legacy-r11");
+    let (carol_kp, _) = mimi_kp("carol-legacy-r11");
+    let (successor, welcome, commit) =
+        crate::mimi::mimi_add_member_commit(m.alice_state.clone(), m.alice.clone(), carol_kp)
+            .unwrap();
+    let (predecessor, successor) = (unsorted(&m.alice_state), noncanonical(&successor));
+    let mut pending =
+        PendingCommit::from_legacy_merged(&predecessor, &successor, &commit, Some(&welcome))
+            .unwrap();
+    pending.bind_submission(SUBMISSION).unwrap();
+    let durable = pending.to_bytes().unwrap();
+    let abandoned = PendingCommit::from_bytes(&durable)
+        .unwrap()
+        .abandon()
+        .unwrap()
+        .into_bytes();
+    assert_eq!(abandoned.as_slice(), predecessor.as_slice());
+    let pending = PendingCommit::from_bytes(&durable).unwrap();
+    let acceptance = accept(&pending);
+    let confirmed = pending
+        .confirm(&predecessor, &acceptance)
+        .unwrap()
+        .into_bytes();
+    assert_eq!(confirmed.as_slice(), successor.as_slice());
+}
+
+#[test]
+fn a_record_whose_original_order_was_altered_is_refused() {
+    let m = mimi_pair("order");
+    let (carol_kp, _) = mimi_kp("carol-order");
+    let pending =
+        mimi_add_member_commit_pending(unsorted(&m.alice_state), m.alice, carol_kp).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&pending.to_bytes().unwrap()).unwrap();
+    let order = value["predecessor_original"]["order"]
+        .as_array_mut()
+        .unwrap();
+    order.swap(0, 1);
+    assert_eq!(
+        PendingCommit::from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        PendingCommitError::Malformed("original bytes")
     );
 }
