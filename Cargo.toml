@@ -30,6 +30,7 @@ openmls_rust_crypto = "0.5.1"
 openmls_traits = "0.5.0"
 serde = "1.0.228"
 serde_json = "1.0.149"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 tls_codec = { version = "0.4.2", features = ["derive", "mls"] }
 chrono = { version = "0.4", features = ["clock"] }
 pgp = { version = "0.14", default-features = false, features = ["wasm"] }

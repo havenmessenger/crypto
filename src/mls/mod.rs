@@ -8,6 +8,8 @@
 pub mod groups;
 pub mod inspection;
 pub mod pending;
+pub mod store;
+pub mod stored;
 pub mod targeted;
 
 pub use pending::{
