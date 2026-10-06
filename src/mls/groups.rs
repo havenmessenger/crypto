@@ -439,6 +439,28 @@ pub fn add_member_pending(
     )
 }
 
+/// Stage a commit that replaces this member's own leaf keys and so moves the group to a new epoch the
+/// member alone holds the secrets of. A device that restored from a saved copy of its group state
+/// commits one before it sends, so nothing it sends reuses a position in a key ratchet that another copy
+/// of the same state may already have used. The commit goes to every other member once the group has
+/// accepted it.
+pub fn self_update_pending(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+) -> anyhow::Result<PendingCommit> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
+    let (commit, _welcome, _group_info) = opened
+        .group
+        .self_update(
+            &opened.provider,
+            &opened.signer,
+            LeafNodeParameters::default(),
+        )
+        .map_err(|e| anyhow::anyhow!("Error updating own leaf: {:?}", e))?
+        .into_messages();
+    staged(opened, &commit, None, &[])
+}
+
 /// Upper bounds on `add_members_bulk`'s batch, generous for any real single-commit add and small
 /// enough to bound the aggregate KeyPackage-validation + HPKE-seal work one call can force.
 /// `check_wire_size` already caps each individual KeyPackage (`MAX_MLS_WIRE_BYTES`); that per-item

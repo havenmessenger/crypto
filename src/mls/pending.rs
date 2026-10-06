@@ -327,11 +327,28 @@ impl PendingCommit {
 
     fn successor_bytes(&self) -> Result<Zeroizing<Vec<u8>>, PendingCommitError> {
         match &self.body {
-            Body::Staged { storage, .. } => {
+            Body::Staged {
+                storage,
+                own_proposals,
+                ..
+            } => {
                 let (provider, mut group) = load_group(storage)?;
                 group
                     .merge_pending_commit(&provider)
                     .map_err(|e| PendingCommitError::Mls(format!("merge: {e:?}")))?;
+                // The commit consumed the proposals this member staged for it. Merging empties the
+                // in-memory proposal store but leaves each proposal's stored entry, which would stay in
+                // the group's state for every later epoch.
+                for reference in own_proposals {
+                    let reference = ProposalRef::tls_deserialize_exact(reference.as_slice())
+                        .map_err(|_| PendingCommitError::Malformed("proposal reference"))?;
+                    match group.remove_pending_proposal(provider.storage(), &reference) {
+                        Ok(()) | Err(RemoveProposalError::ProposalNotFound) => {}
+                        Err(e) => {
+                            return Err(PendingCommitError::Mls(format!("remove proposal: {e:?}")))
+                        }
+                    }
+                }
                 if binding(&group) != self.successor_binding {
                     return Err(PendingCommitError::Malformed(
                         "merged state does not match the staged successor",

@@ -21,6 +21,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::mimi::{self, MimiWelcomeError, PreparedWelcome};
 use crate::mls::groups::{self, IndexedMlsMember};
 use crate::mls::inspection::{self, GroupStateMetadata};
+use crate::mls::pending::{CommitAcceptance, ConfirmRefused, PendingCommit};
 use crate::mls::store::{apply_change, decode_state, read_entries, state_v1, EntryMap, MlsStore};
 use crate::mls::AuthenticatedSender;
 
@@ -256,6 +257,147 @@ pub fn mls_process_commit(
 pub fn inspect_group(store: &dyn MlsStore, group: &[u8]) -> anyhow::Result<GroupStateMetadata> {
     let (_, state) = load(store, group)?;
     inspection::inspect_group_state(&state)
+}
+
+// ---- commits made in two steps ----
+//
+// A commit this member makes takes effect only once the group has accepted it. Staging reads the group
+// from the store and returns a [`PendingCommit`] to keep; nothing is written. Confirming a commit the
+// group accepted installs its successor in the store, and abandoning one the group refused for good
+// installs the predecessor-epoch state it leaves behind.
+
+/// Run a staging function on the group's current state.
+fn stage_op(
+    store: &dyn MlsStore,
+    group: &[u8],
+    operation: impl FnOnce(Vec<u8>) -> anyhow::Result<PendingCommit>,
+) -> anyhow::Result<PendingCommit> {
+    read_op(store, group, operation)
+}
+
+/// Stage a commit that replaces this member's own leaf keys.
+pub fn self_update_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    bundle: &[u8],
+) -> anyhow::Result<PendingCommit> {
+    stage_op(store, group, |state| {
+        groups::self_update_pending(state, bundle.to_vec())
+    })
+}
+
+/// Stage the Add of one member.
+pub fn add_member_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    bundle: &[u8],
+    key_package: &[u8],
+) -> anyhow::Result<PendingCommit> {
+    stage_op(store, group, |state| {
+        groups::add_member_pending(state, bundle.to_vec(), key_package.to_vec())
+    })
+}
+
+/// Stage the Add of every member holding one of `key_packages`.
+pub fn add_members_bulk_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    bundle: &[u8],
+    key_packages: &[Vec<u8>],
+) -> anyhow::Result<PendingCommit> {
+    stage_op(store, group, |state| {
+        groups::add_members_bulk_pending(state, bundle.to_vec(), key_packages.to_vec())
+    })
+}
+
+/// Stage the removal of the member whose credential is `credential_identity`.
+pub fn remove_member_by_credential_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    bundle: &[u8],
+    credential_identity: &str,
+) -> anyhow::Result<PendingCommit> {
+    stage_op(store, group, |state| {
+        groups::remove_member_by_credential_pending(
+            state,
+            bundle.to_vec(),
+            credential_identity.to_owned(),
+        )
+    })
+}
+
+/// Stage the Add of a member together with the roster it carries.
+pub fn mimi_add_member_commit_appsync_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    bundle: &[u8],
+    key_package: &[u8],
+    roster_payload: &[u8],
+) -> anyhow::Result<PendingCommit> {
+    stage_op(store, group, |state| {
+        mimi::mimi_add_member_commit_appsync_pending(
+            state,
+            bundle.to_vec(),
+            key_package.to_vec(),
+            roster_payload.to_vec(),
+        )
+    })
+}
+
+/// Stage the removal of a member together with the roster it carries.
+pub fn mimi_remove_member_commit_appsync_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    bundle: &[u8],
+    credential_identity: &str,
+    roster_payload: &[u8],
+) -> anyhow::Result<PendingCommit> {
+    stage_op(store, group, |state| {
+        mimi::mimi_remove_member_commit_appsync_pending(
+            state,
+            bundle.to_vec(),
+            credential_identity.to_owned(),
+            roster_payload.to_vec(),
+        )
+    })
+}
+
+/// Install the successor of a commit the group accepted, writing only the entries it changed or removed.
+/// A refusal (the acceptance does not name this commit, or the store's state is no longer its
+/// predecessor) returns the pending commit unchanged and writes nothing.
+pub fn confirm_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    pending: PendingCommit,
+    acceptance: &CommitAcceptance,
+) -> Result<(), ConfirmFailure> {
+    let (before, state) = load(store, group).map_err(ConfirmFailure::Store)?;
+    let confirmed = pending
+        .confirm(&state, acceptance)
+        .map_err(|refused| ConfirmFailure::Refused(Box::new(refused)))?;
+    commit(store, &before, confirmed.into_bytes().to_vec()).map_err(ConfirmFailure::Store)?;
+    Ok(())
+}
+
+/// Install the predecessor-epoch state a commit the group refused for good leaves behind.
+pub fn abandon_pending(
+    store: &dyn MlsStore,
+    group: &[u8],
+    pending: PendingCommit,
+) -> anyhow::Result<()> {
+    let (before, _) = load(store, group)?;
+    let abandoned = pending.abandon()?;
+    commit(store, &before, abandoned.into_bytes().to_vec())?;
+    Ok(())
+}
+
+/// Why [`confirm_pending`] did not install a successor.
+#[derive(Debug)]
+pub enum ConfirmFailure {
+    /// The commit was not confirmed; the pending commit is returned unchanged.
+    Refused(Box<ConfirmRefused>),
+    /// The store could not be read or written.
+    Store(anyhow::Error),
 }
 
 // ---- mimi ----

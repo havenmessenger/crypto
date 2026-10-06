@@ -313,3 +313,125 @@ fn per_operation_cost_of_the_two_apis() {
         );
     }
 }
+
+fn label_counts(store: &MemoryMlsStore, group: &[u8]) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for (key, _) in store.entries(group) {
+        let end = key
+            .iter()
+            .position(|b| !b.is_ascii_alphabetic())
+            .unwrap_or(key.len());
+        *counts
+            .entry(String::from_utf8_lossy(&key[..end]).into_owned())
+            .or_insert(0) += 1;
+    }
+    counts
+}
+
+#[test]
+fn admissions_do_not_leave_consumed_proposals_in_the_store() {
+    let (_, _, alice) = crate::mimi::mimi_generate_identity("alice".into(), now()).unwrap();
+    let store = MemoryMlsStore::new();
+    mimi_create_group(&store, "leak", &alice).unwrap();
+    for n in 0..5u8 {
+        let (_, package, _) =
+            crate::mimi::mimi_generate_identity(format!("member-{n}"), now()).unwrap();
+        mimi_add_member_commit_appsync(&store, b"leak", &alice, &package, &[n]).unwrap();
+        eprintln!("after admission {n}: {:?}", label_counts(&store, b"leak"));
+    }
+    let counts = label_counts(&store, b"leak");
+    assert_eq!(
+        counts.get("QueuedProposal").copied().unwrap_or(0),
+        0,
+        "proposals a commit consumed stay in the store: {counts:?}"
+    );
+}
+
+/// A device restored from a saved per-group record commits a self-update before it sends; the group keeps
+/// working in both directions, and a copy that kept running after the save is not the one that continues.
+#[test]
+fn a_restored_member_self_updates_and_the_group_continues() {
+    use crate::mls::pending::CommitAcceptance;
+    use crate::mls::store::export_state_v2;
+
+    let (_, _, alice) = crate::mimi::mimi_generate_identity("alice".into(), now()).unwrap();
+    let (_, bob_package, bob) = crate::mimi::mimi_generate_identity("bob".into(), now()).unwrap();
+    let alice_store = MemoryMlsStore::new();
+    mimi_create_group(&alice_store, "restore", &alice).unwrap();
+    let (welcome, _commit) =
+        mimi_add_member_commit_appsync(&alice_store, b"restore", &alice, &bob_package, &[1])
+            .unwrap();
+    let bob_store = MemoryMlsStore::new();
+    let (group, bob) = process_welcome(&bob_store, &welcome, &bob).unwrap();
+    assert_eq!(group, b"restore");
+
+    // The per-group record bob would have uploaded at this epoch.
+    let record = export_state_v2(&bob_store, b"restore").unwrap();
+
+    // Bob keeps running and receives a message: his ratchet moves past the saved record.
+    let before =
+        encrypt_message(&alice_store, b"restore", &alice, b"seen before the loss").unwrap();
+    decrypt_message(&bob_store, b"restore", &bob, &before).unwrap();
+
+    // A new phone restores the saved record into an empty store.
+    let phone = MemoryMlsStore::new();
+    import_state(&phone, &record).unwrap();
+    assert_eq!(inspect_group(&phone, b"restore").unwrap().epoch, 1);
+
+    // It stages a self-update, the group (alice) accepts and applies it, and the phone confirms.
+    let mut pending = self_update_pending(&phone, b"restore", &bob).unwrap();
+    pending.bind_submission(b"phone-submission").unwrap();
+    let commit = pending.commit().to_vec();
+    let acceptance = CommitAcceptance::new(
+        pending.group_id(),
+        pending.predecessor_epoch(),
+        &commit,
+        b"phone-submission",
+    );
+    let phone_before = phone.entries(b"restore");
+    mls_process_commit(&alice_store, b"restore", &alice, &commit).unwrap();
+    confirm_pending(&phone, b"restore", pending, &acceptance).unwrap();
+    assert_ne!(
+        phone.entries(b"restore"),
+        phone_before,
+        "the successor replaced the saved epoch"
+    );
+    assert_eq!(inspect_group(&phone, b"restore").unwrap().epoch, 2);
+    assert_eq!(inspect_group(&alice_store, b"restore").unwrap().epoch, 2);
+
+    // Both directions work at the new epoch.
+    let to_phone = encrypt_message(&alice_store, b"restore", &alice, b"hello phone").unwrap();
+    assert_eq!(
+        decrypt_message(&phone, b"restore", &bob, &to_phone)
+            .unwrap()
+            .0,
+        b"hello phone"
+    );
+    let from_phone = encrypt_message(&phone, b"restore", &bob, b"hello alice").unwrap();
+    assert_eq!(
+        decrypt_message(&alice_store, b"restore", &alice, &from_phone)
+            .unwrap()
+            .0,
+        b"hello alice"
+    );
+
+    // The copy that kept running is at the old epoch and cannot read the new one.
+    assert!(decrypt_message(&bob_store, b"restore", &bob, &to_phone).is_err());
+}
+
+#[test]
+fn confirming_with_the_wrong_acceptance_installs_nothing() {
+    use crate::mls::pending::CommitAcceptance;
+    let p = pair();
+    let mut pending = self_update_pending(&p.bob_store, b"stored-test", &p.bob).unwrap();
+    pending.bind_submission(b"s").unwrap();
+    let wrong = CommitAcceptance::new(
+        b"stored-test",
+        pending.predecessor_epoch(),
+        b"other commit",
+        b"s",
+    );
+    p.bob_store.reset();
+    assert!(confirm_pending(&p.bob_store, b"stored-test", pending, &wrong).is_err());
+    assert_eq!(p.bob_store.written(), (0, 0));
+}
