@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use openmls::prelude::{GroupId, MlsGroup};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use zeroize::{Zeroize, Zeroizing};
@@ -251,6 +252,20 @@ pub fn mls_process_commit(
     write_op(store, group, |state| {
         groups::mls_process_commit(state, bundle.to_vec(), commit.to_vec())
     })
+}
+
+/// The group's current epoch, read without decoding anything else.
+pub fn current_epoch(store: &dyn MlsStore, group: &[u8]) -> anyhow::Result<u64> {
+    let entries = read_entries(store, group).map_err(store_error)?;
+    if entries.is_empty() {
+        anyhow::bail!("the store holds no state for this group");
+    }
+    let provider = load_provider(&entries);
+    let epoch = MlsGroup::load(provider.storage(), &GroupId::from_slice(group))
+        .map_err(|e| anyhow::anyhow!("Error loading group: {e:?}"))?
+        .map(|g| g.epoch().as_u64());
+    take_entries(&provider);
+    epoch.ok_or_else(|| anyhow::anyhow!("Group not found in storage"))
 }
 
 /// The group's epoch and retention settings.

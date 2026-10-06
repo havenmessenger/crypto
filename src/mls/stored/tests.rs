@@ -397,6 +397,7 @@ fn a_restored_member_self_updates_and_the_group_continues() {
         "the successor replaced the saved epoch"
     );
     assert_eq!(inspect_group(&phone, b"restore").unwrap().epoch, 2);
+    assert_eq!(current_epoch(&phone, b"restore").unwrap(), 2);
     assert_eq!(inspect_group(&alice_store, b"restore").unwrap().epoch, 2);
 
     // Both directions work at the new epoch.
