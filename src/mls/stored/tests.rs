@@ -234,3 +234,82 @@ fn a_mimi_group_is_made_and_listed_through_a_store() {
     mimi_create_group(&store, "mimi-stored", &alice).unwrap();
     assert_eq!(list_members(&store, b"mimi-stored").unwrap().len(), 1);
 }
+
+/// Per-operation cost of the byte-in/byte-out functions against the store-backed ones, at 40 and 200 members.
+/// Run with `cargo test --release -- --ignored --nocapture per_operation_cost`.
+#[test]
+#[ignore = "measurement"]
+fn per_operation_cost_of_the_two_apis() {
+    use std::time::Instant;
+    let (_, _, founder) = generate_identity("founder".into(), now()).unwrap();
+    let mut state = groups::create_group("cost".into(), founder.clone()).unwrap();
+    let mut members = 1usize;
+    let mut last: Option<(Vec<u8>, Vec<u8>)> = None;
+    for target in [40usize, 200] {
+        while members < target {
+            let batch = (target - members).min(10);
+            let mut packages = Vec::new();
+            let mut bundle = Vec::new();
+            for n in 0..batch {
+                let (_, package, b) = generate_identity(format!("m{members}-{n}"), now()).unwrap();
+                packages.push(package);
+                bundle = b;
+            }
+            let (s, welcome, _) =
+                groups::add_members_bulk(state, founder.clone(), packages).unwrap();
+            state = s;
+            members += batch;
+            last = Some((welcome, bundle));
+        }
+        let (welcome, joiner_bundle) = last.clone().unwrap();
+        let (joiner_state, _) = groups::process_welcome(welcome, joiner_bundle.clone()).unwrap();
+        let rounds = 40u32;
+
+        // encrypt: byte API
+        let mut s = state.clone();
+        let t = Instant::now();
+        for _ in 0..rounds {
+            s = groups::encrypt_message(s, founder.clone(), vec![1; 64])
+                .unwrap()
+                .0;
+        }
+        let old_encrypt = t.elapsed() / rounds;
+        // encrypt: store API
+        let store = MemoryMlsStore::from_state(&state).unwrap();
+        let t = Instant::now();
+        for _ in 0..rounds {
+            encrypt_message(&store, b"cost", &founder, &[1; 64]).unwrap();
+        }
+        let new_encrypt = t.elapsed() / rounds;
+
+        // decrypt: ciphertexts made by the founder for the joiner's epoch
+        let mut cts = Vec::new();
+        let mut s = state.clone();
+        for _ in 0..rounds {
+            let (next, ct) = groups::encrypt_message(s, founder.clone(), vec![2; 64]).unwrap();
+            s = next;
+            cts.push(ct);
+        }
+        let mut js = joiner_state.clone();
+        let t = Instant::now();
+        for ct in &cts {
+            js = groups::decrypt_message(js, joiner_bundle.clone(), ct.clone())
+                .unwrap()
+                .0;
+        }
+        let old_decrypt = t.elapsed() / rounds;
+        let jstore = MemoryMlsStore::from_state(&joiner_state).unwrap();
+        let group = {
+            let (g, _) = crate::mls::store::decode_state(&joiner_state).unwrap();
+            g
+        };
+        let t = Instant::now();
+        for ct in &cts {
+            decrypt_message(&jstore, &group, &joiner_bundle, ct).unwrap();
+        }
+        let new_decrypt = t.elapsed() / rounds;
+        eprintln!(
+            "members={members}: encrypt old {old_encrypt:?} -> store {new_encrypt:?}; decrypt old {old_decrypt:?} -> store {new_decrypt:?}"
+        );
+    }
+}

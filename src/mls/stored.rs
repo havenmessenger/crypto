@@ -8,9 +8,15 @@
 //!
 //! The identity bundle (the signing key and key-package material) stays a byte value the caller holds.
 
+#![allow(
+    clippy::unwrap_used // in-memory provider RwLock guards only (see crate::mls::groups module doc)
+)]
+
 use std::collections::BTreeMap;
 
-use zeroize::Zeroizing;
+use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::mimi::{self, MimiWelcomeError, PreparedWelcome};
 use crate::mls::groups::{self, IndexedMlsMember};
@@ -62,6 +68,52 @@ fn write_op<T>(
     Ok(output)
 }
 
+/// An openmls provider whose storage holds `entries`.
+fn load_provider(entries: &EntryMap) -> OpenMlsRustCrypto {
+    let provider = OpenMlsRustCrypto::default();
+    let loaded = entries
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    *provider.storage().values.write().unwrap() = loaded;
+    provider
+}
+
+/// The entries in `provider`'s storage, wiping the provider's own copy.
+fn take_entries(provider: &OpenMlsRustCrypto) -> EntryMap {
+    let entries: EntryMap = provider
+        .storage()
+        .values
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for value in provider.storage().values.write().unwrap().values_mut() {
+        value.zeroize();
+    }
+    entries
+}
+
+/// Run an operation directly on an in-memory openmls provider holding the group's entries, with no
+/// whole-state serialization in between, and store what it changed.
+fn direct_op<T>(
+    store: &dyn MlsStore,
+    group: &[u8],
+    operation: impl FnOnce(&OpenMlsRustCrypto) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let before = read_entries(store, group).map_err(store_error)?;
+    if before.is_empty() {
+        anyhow::bail!("the store holds no state for this group");
+    }
+    let provider = load_provider(&before);
+    let output = operation(&provider);
+    let after = take_entries(&provider);
+    let output = output?;
+    apply_change(store, group, &before, &after).map_err(store_error)?;
+    Ok(output)
+}
+
 /// Run an operation that makes a group, and store its entries. Returns the new group's id.
 fn create_op(
     store: &dyn MlsStore,
@@ -88,8 +140,8 @@ pub fn encrypt_message(
     bundle: &[u8],
     message: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    write_op(store, group, |state| {
-        groups::encrypt_message(state, bundle.to_vec(), message.to_vec())
+    direct_op(store, group, |provider| {
+        groups::encrypt_in(provider, group, bundle, message)
     })
 }
 
@@ -97,13 +149,11 @@ pub fn encrypt_message(
 pub fn decrypt_message(
     store: &dyn MlsStore,
     group: &[u8],
-    bundle: &[u8],
+    _bundle: &[u8],
     ciphertext: &[u8],
 ) -> anyhow::Result<(Vec<u8>, AuthenticatedSender)> {
-    write_op(store, group, |state| {
-        let (state, plaintext, sender) =
-            groups::decrypt_message(state, bundle.to_vec(), ciphertext.to_vec())?;
-        Ok((state, (plaintext, sender)))
+    direct_op(store, group, |provider| {
+        groups::decrypt_in(provider, group, ciphertext)
     })
 }
 

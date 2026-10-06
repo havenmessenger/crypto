@@ -264,9 +264,6 @@ pub fn encrypt_message(
     let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
         .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
 
-    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
-
     let provider = OpenMlsRustCrypto::default();
 
     // Inject storage
@@ -275,19 +272,7 @@ pub fn encrypt_message(
         *values = mem::take(&mut state.storage_map).into_iter().collect();
     }
 
-    let signer = MlsSigner {
-        key: Zeroizing::new(mem::take(&mut identity.private_key)),
-        scheme: identity.signature_scheme,
-    };
-
-    let group_id = GroupId::from_slice(&state.group_id);
-    let mut group = MlsGroup::load(provider.storage(), &group_id)
-        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
-
-    let message = group
-        .create_message(&provider, &signer, &message_bytes)
-        .map_err(|e| anyhow::anyhow!("Encryption error: {:?}", e))?;
+    let ciphertext = encrypt_in(&provider, &state.group_id, &bundle_bytes, &message_bytes)?;
 
     // Export updated storage
     let new_storage_map = {
@@ -301,9 +286,35 @@ pub fn encrypt_message(
     };
     let new_group_state = crate::mls::zeroizing_json(&new_state)?;
 
-    let ciphertext = message.tls_serialize_detached()?;
-
     Ok((new_group_state.to_vec(), ciphertext))
+}
+
+/// Encrypt `message` to the group whose storage `provider` holds. Returns the ciphertext; the group's
+/// new secrets are in `provider`'s storage afterwards.
+pub(crate) fn encrypt_in(
+    provider: &OpenMlsRustCrypto,
+    group_id: &[u8],
+    bundle_bytes: &[u8],
+    message: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let mut identity: IdentityBundle = serde_json::from_slice(bundle_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
+
+    let signer = MlsSigner {
+        key: Zeroizing::new(mem::take(&mut identity.private_key)),
+        scheme: identity.signature_scheme,
+    };
+
+    let group_id = GroupId::from_slice(group_id);
+    let mut group = MlsGroup::load(provider.storage(), &group_id)
+        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+
+    let message = group
+        .create_message(provider, &signer, message)
+        .map_err(|e| anyhow::anyhow!("Encryption error: {:?}", e))?;
+
+    Ok(message.tls_serialize_detached()?)
 }
 
 pub fn decrypt_message(
@@ -327,29 +338,7 @@ pub fn decrypt_message(
         *values = mem::take(&mut state.storage_map).into_iter().collect();
     }
 
-    let group_id = GroupId::from_slice(&state.group_id);
-    let mut group = MlsGroup::load(provider.storage(), &group_id)
-        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
-        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
-
-    crate::mls::check_wire_size(&ciphertext_bytes, "decrypt_message ciphertext")?;
-    let message_in = MlsMessageIn::tls_deserialize_exact(ciphertext_bytes.as_slice())?;
-    let message = ProtocolMessage::try_from(message_in)
-        .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
-
-    let processed_message = group
-        .process_message(&provider, message)
-        .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
-
-    // Surface the sender openmls just authenticated, before into_content() consumes the
-    // processed message. An application message does not change membership, so the sender's
-    // leaf is present in the loaded group either side of this call.
-    let sender = crate::mls::authenticated_sender(&group, &processed_message)?;
-
-    let content = match processed_message.into_content() {
-        ProcessedMessageContent::ApplicationMessage(app_msg) => app_msg.into_bytes(),
-        _ => return Err(anyhow::anyhow!("Not an application message")),
-    };
+    let (content, sender) = decrypt_in(&provider, &state.group_id, &ciphertext_bytes)?;
 
     // Export updated storage
     let new_storage_map = {
@@ -364,6 +353,41 @@ pub fn decrypt_message(
     let new_group_state = crate::mls::zeroizing_json(&new_state)?;
 
     Ok((new_group_state.to_vec(), content, sender))
+}
+
+/// Decrypt `ciphertext` for the group whose storage `provider` holds. Returns the plaintext and the
+/// member the group authenticated as its sender; the group's new secrets are in `provider`'s storage
+/// afterwards.
+pub(crate) fn decrypt_in(
+    provider: &OpenMlsRustCrypto,
+    group_id: &[u8],
+    ciphertext: &[u8],
+) -> anyhow::Result<(Vec<u8>, crate::mls::AuthenticatedSender)> {
+    let group_id = GroupId::from_slice(group_id);
+    let mut group = MlsGroup::load(provider.storage(), &group_id)
+        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+
+    crate::mls::check_wire_size(ciphertext, "decrypt_message ciphertext")?;
+    let message_in = MlsMessageIn::tls_deserialize_exact(ciphertext)?;
+    let message = ProtocolMessage::try_from(message_in)
+        .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
+
+    let processed_message = group
+        .process_message(provider, message)
+        .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+
+    // Surface the sender openmls just authenticated, before into_content() consumes the
+    // processed message. An application message does not change membership, so the sender's
+    // leaf is present in the loaded group either side of this call.
+    let sender = crate::mls::authenticated_sender(&group, &processed_message)?;
+
+    let content = match processed_message.into_content() {
+        ProcessedMessageContent::ApplicationMessage(app_msg) => app_msg.into_bytes(),
+        _ => return Err(anyhow::anyhow!("Not an application message")),
+    };
+
+    Ok((content, sender))
 }
 
 /// Add a member to the MLS group using their KeyPackage.
