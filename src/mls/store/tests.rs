@@ -67,24 +67,14 @@ fn a_snapshot_in_either_form_imports_to_the_same_entries() {
 }
 
 #[test]
-fn the_binary_snapshot_is_a_third_the_size_of_the_json_one() {
+fn the_binary_snapshot_is_under_a_third_the_size_of_the_json_one() {
     let v1 = real_state();
     let store = MemoryMlsStore::from_state(&v1).unwrap();
     let v2 = store.to_state_v2(b"store-test").unwrap();
-    let raw: usize = store
-        .entries(b"store-test")
-        .iter()
-        .map(|(k, v)| k.len() + v.len())
-        .sum();
     assert!(
-        v1.len() * 10 >= v2.len() * 30,
-        "json {} bytes, binary {} bytes: expected at least 3x",
+        v1.len() >= v2.len() * 5,
+        "json {} bytes, binary {} bytes: expected at least 5x",
         v1.len(),
-        v2.len()
-    );
-    assert!(
-        v2.len() <= raw + 200,
-        "binary {} bytes carries {raw} bytes of entries with more than a small framing",
         v2.len()
     );
 }

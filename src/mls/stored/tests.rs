@@ -264,6 +264,17 @@ fn per_operation_cost_of_the_two_apis() {
         let (welcome, joiner_bundle) = last.clone().unwrap();
         let (joiner_state, _) = groups::process_welcome(welcome, joiner_bundle.clone()).unwrap();
         let rounds = 40u32;
+        let record = MemoryMlsStore::from_state(&state)
+            .unwrap()
+            .to_state_v2(b"cost")
+            .unwrap();
+        eprintln!(
+            "members={members}: json state {} B, per-group record (v2) {} B ({:.1}x smaller, {:.0} B per member)",
+            state.len(),
+            record.len(),
+            state.len() as f64 / record.len() as f64,
+            record.len() as f64 / members as f64
+        );
 
         // encrypt: byte API
         let mut s = state.clone();

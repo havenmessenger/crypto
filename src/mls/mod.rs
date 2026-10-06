@@ -5,6 +5,7 @@
 //! directly - they are serde-serialized opaque value types, not app-binding types, so exposing
 //! them here does not require this crate to depend on any binding layer.
 
+pub mod entry_codec;
 pub mod groups;
 pub mod inspection;
 pub mod pending;

@@ -7,7 +7,9 @@
 //! back it up as a log, or keep it in a database row per entry.
 //!
 //! Keys and values are opaque to the store. Values are secret material: an implementor protects them at
-//! rest and does not log them.
+//! rest and does not log them. crypto-core stores each value in the compact binary form of
+//! [`crate::mls::entry_codec`], which it reads back to the text openmls wrote; a value an older version
+//! stored as text is read as it is.
 //!
 //! # Write contract
 //!
@@ -29,6 +31,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::mls::entry_codec::{decode_value, encode_value};
 use crate::mls::GroupState;
 
 /// One storage entry: its key and its value.
@@ -202,14 +205,15 @@ impl Drop for StateV2 {
     }
 }
 
-/// Every entry of `group` in `store`, sorted by key.
+/// Every entry of `group` in `store`, sorted by key, each value as the text openmls wrote.
 pub fn read_entries(store: &dyn MlsStore, group: &[u8]) -> Result<EntryMap, MlsStoreError> {
     let mut entries = BTreeMap::new();
     for key in store.keys(group)? {
-        let value = store
+        let stored = store
             .get(group, &key)?
             .ok_or_else(|| MlsStoreError::Corrupt("a listed key has no value".into()))?;
-        entries.insert(key, value);
+        let value = decode_value(&stored)?;
+        entries.insert(key, value.to_vec());
     }
     Ok(entries)
 }
@@ -223,7 +227,7 @@ pub fn encode_state_v2(
         group_id: group.to_vec(),
         entries: entries
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), encode_value(v)))
             .collect(),
     };
     let encoded = Zeroizing::new(
@@ -241,11 +245,10 @@ pub fn decode_state(bytes: &[u8]) -> Result<(Vec<u8>, EntryMap), MlsStoreError> 
     if let Some(body) = bytes.strip_prefix(STATE_V2_MAGIC.as_slice()) {
         let state: StateV2 = postcard::from_bytes(body)
             .map_err(|error| MlsStoreError::Corrupt(format!("binary snapshot: {error}")))?;
-        let entries = state
-            .entries
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut entries = EntryMap::new();
+        for (key, value) in &state.entries {
+            entries.insert(key.clone(), decode_value(value)?.to_vec());
+        }
         return Ok((state.group_id.clone(), entries));
     }
     let state: GroupState = serde_json::from_slice(bytes)
@@ -297,8 +300,8 @@ pub(crate) fn state_v1(
     crate::mls::zeroizing_json(&state).map_err(|error| MlsStoreError::Corrupt(error.to_string()))
 }
 
-/// Make `store`'s entries for `group` equal `after`, given that they equal `before`: put what is new or
-/// different, delete what is gone, and touch nothing else. Returns how many entries it put and deleted.
+/// Make `store`'s entries for `group` equal `after`, given that they equal `before` (both as text): put what is
+/// new or different, in the binary form, delete what is gone, and touch nothing else. Returns how many entries it put and deleted.
 pub fn apply_change(
     store: &dyn MlsStore,
     group: &[u8],
@@ -308,7 +311,7 @@ pub fn apply_change(
     let mut puts = 0;
     for (key, value) in after {
         if before.get(key) != Some(value) {
-            store.put(group, key, value)?;
+            store.put(group, key, &encode_value(value))?;
             puts += 1;
         }
     }
