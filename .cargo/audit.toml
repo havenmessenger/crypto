@@ -60,6 +60,15 @@ ignore = [
     "RUSTSEC-2026-0211",
     "RUSTSEC-2026-0210",
 
+    # RUSTSEC-2026-0330 - `libcrux-kem` 0.0.7: hybrid encapsulation from a seed panics on a short seed.
+    # RUSTSEC-2026-0331 - `libcrux-kem` 0.0.7: panic on decoding short hybrid keys (fixed in 0.0.10).
+    # NON-ACTIVATED LOCKFILE PHANTOM, same class as RUSTSEC-2026-0209 above. `cargo tree -i libcrux-kem` and
+    # `-i hpke-rs-libcrux`, its only dependent, print NOTHING under default / --all-features / --target all /
+    # -e all: the libcrux hpke-rs backend is never compiled, and no newer hpke-rs-libcrux exists to move the lock
+    # to 0.0.10. Re-evaluate if that backend is ever activated.
+    "RUSTSEC-2026-0330",
+    "RUSTSEC-2026-0331",
+
     # RUSTSEC-2026-0207 - `libcrux-sha3` 0.0.8: incorrect output of the incremental portable SHAKE API on
     # multiple squeeze calls (HIGH 8.2, fix >=0.0.10).
     # RUSTSEC-2026-0208 - `libcrux-sha3` 0.0.8: potential panic in the AVX2 SHAKE-256 path (HIGH 8.2, fix
