@@ -581,6 +581,25 @@ pub fn mimi_add_members_bulk_commit_appsync_pending(
     key_packages_bytes: Vec<Vec<u8>>,
     roster_payload: Vec<u8>,
 ) -> anyhow::Result<PendingCommit> {
+    mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
+        group_state_bytes,
+        bundle_bytes,
+        key_packages_bytes,
+        roster_payload,
+        Vec::new(),
+    )
+}
+
+/// [`mimi_add_members_bulk_commit_appsync_pending`] with `authenticated_data` in the commit's framing: carried in the
+/// clear in its PublicMessage, covered by the committer's signature, and read by anyone who parses the framing, such as
+/// a delivery service that orders the commit without being a member of the group.
+pub fn mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    key_packages_bytes: Vec<Vec<u8>>,
+    roster_payload: Vec<u8>,
+    authenticated_data: Vec<u8>,
+) -> anyhow::Result<PendingCommit> {
     anyhow::ensure!(
         !key_packages_bytes.is_empty(),
         "mimi bulk Add requires a KeyPackage"
@@ -617,6 +636,8 @@ pub fn mimi_add_members_bulk_commit_appsync_pending(
         .group
         .propose_custom_proposal_by_value(&opened.provider, &opened.signer, custom)
         .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
+    // Set after the roster proposal, which would otherwise consume it: the commit is the message that carries it.
+    opened.group.set_aad(authenticated_data);
     let (commit, welcome, _gi) = opened
         .group
         .commit_builder()

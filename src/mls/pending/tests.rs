@@ -10,7 +10,8 @@ use crate::identity::generate_identity;
 use crate::mimi::{
     mimi_accept_external_remove_proposal_pending, mimi_add_member, mimi_add_member_commit_appsync,
     mimi_add_member_commit_appsync_pending, mimi_add_member_commit_pending,
-    mimi_add_member_pending, mimi_add_members_bulk_commit_appsync_pending, mimi_create_group,
+    mimi_add_member_pending, mimi_add_members_bulk_commit_appsync_pending,
+    mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data, mimi_create_group,
     mimi_generate_identity, mimi_process_welcome_non_atomic,
     mimi_remove_member_commit_appsync_pending, mimi_remove_member_commit_by_leaf_index_pending,
     mimi_remove_member_commit_pending, mls_process_commit_appsync,
@@ -1093,5 +1094,92 @@ fn same_entries_needs_the_same_group_and_the_same_entries() {
     assert!(
         !same_entries(&a, &state(b"g", &[(b"k1", b"v1"), (b"k2", b"v9")])),
         "a value changed"
+    );
+}
+
+/// The `authenticated_data` of a PublicMessage commit, read from its framing the way a delivery service that is not a
+/// group member reads it (RFC 9420 §6: version, wire format, then FramedContent's group id, epoch, sender and
+/// authenticated data; lengths are MLS variable-length integers, §2.1.2).
+fn framed_authenticated_data(commit: &[u8]) -> (std::ops::Range<usize>, Vec<u8>) {
+    fn varint(bytes: &[u8], at: usize) -> (usize, usize) {
+        let first = bytes[at];
+        let width = 1usize << (first >> 6);
+        let mut value = usize::from(first & 0x3f);
+        for byte in &bytes[at + 1..at + width] {
+            value = (value << 8) | usize::from(*byte);
+        }
+        (value, at + width)
+    }
+    assert_eq!(
+        u16::from_be_bytes([commit[2], commit[3]]),
+        1,
+        "a PublicMessage"
+    );
+    let (group_id, at) = varint(commit, 4);
+    let at = at + group_id + 8; // the group id, then the epoch
+    assert_eq!(commit[at], 1, "a member sender");
+    let (length, at) = varint(commit, at + 1 + 4); // sender type, then its leaf index
+    (at..at + length, commit[at..at + length].to_vec())
+}
+
+#[test]
+fn an_add_commit_carries_its_authenticated_data_in_the_clear_and_the_member_still_applies_it() {
+    let m = mimi_pair("aad");
+    let (carol_kp, _carol) = mimi_kp("carol-aad");
+    let statement = b"admission statement: carol, by alice".to_vec();
+    let pending = mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
+        m.alice_state.clone(),
+        m.alice.clone(),
+        vec![carol_kp],
+        vec![0x81, 0x01],
+        statement.clone(),
+    )
+    .unwrap();
+    let commit = pending.commit().to_vec();
+    assert_eq!(framed_authenticated_data(&commit).1, statement);
+    let (_, roster, _) = mls_process_commit_appsync(m.bob_state, m.bob, commit).unwrap();
+    assert_eq!(
+        roster,
+        vec![0x81, 0x01],
+        "the member applies the commit as before"
+    );
+}
+
+#[test]
+fn an_add_commit_without_authenticated_data_carries_none() {
+    let m = mimi_pair("no-aad");
+    let (carol_kp, _carol) = mimi_kp("carol-no-aad");
+    let pending = mimi_add_members_bulk_commit_appsync_pending(
+        m.alice_state.clone(),
+        m.alice.clone(),
+        vec![carol_kp],
+        vec![0x81, 0x01],
+    )
+    .unwrap();
+    assert!(framed_authenticated_data(pending.commit()).1.is_empty());
+}
+
+#[test]
+fn authenticated_data_altered_in_transit_is_refused_by_the_member() {
+    let m = mimi_pair("aad-altered");
+    let (carol_kp, _carol) = mimi_kp("carol-aad-altered");
+    let pending = mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
+        m.alice_state.clone(),
+        m.alice.clone(),
+        vec![carol_kp],
+        vec![0x81, 0x01],
+        b"admitted by alice".to_vec(),
+    )
+    .unwrap();
+    let mut commit = pending.commit().to_vec();
+    let (range, _) = framed_authenticated_data(&commit);
+    assert!(
+        !range.is_empty(),
+        "the commit carries the authenticated data to alter"
+    );
+    commit[range.start] ^= 0x01;
+    assert!(
+        mls_process_commit_appsync(m.bob_state, m.bob, commit).is_err(),
+        "the committer's signature covers the authenticated data"
     );
 }
