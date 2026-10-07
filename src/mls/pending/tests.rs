@@ -13,8 +13,10 @@ use crate::mimi::{
     mimi_add_member_pending, mimi_add_members_bulk_commit_appsync_pending,
     mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data, mimi_create_group,
     mimi_generate_identity, mimi_process_welcome_non_atomic,
-    mimi_remove_member_commit_appsync_pending, mimi_remove_member_commit_by_leaf_index_pending,
-    mimi_remove_member_commit_pending, mls_process_commit_appsync,
+    mimi_remove_member_commit_appsync_pending,
+    mimi_remove_member_commit_appsync_pending_with_authenticated_data,
+    mimi_remove_member_commit_by_leaf_index_pending, mimi_remove_member_commit_pending,
+    mls_process_commit_appsync,
 };
 use crate::mls::groups::{
     add_member, add_member_pending, add_members_bulk_pending, create_group, decrypt_message,
@@ -1182,4 +1184,32 @@ fn authenticated_data_altered_in_transit_is_refused_by_the_member() {
         mls_process_commit_appsync(m.bob_state, m.bob, commit).is_err(),
         "the committer's signature covers the authenticated data"
     );
+}
+
+#[test]
+fn a_remove_commit_carries_its_authenticated_data_in_the_clear() {
+    let m = mimi_pair("remove-aad");
+    let statement = b"removal statement: bob, by alice".to_vec();
+    let pending = mimi_remove_member_commit_appsync_pending_with_authenticated_data(
+        m.alice_state.clone(),
+        m.alice.clone(),
+        "bob-remove-aad@as.test".into(),
+        vec![0x81, 0x01],
+        statement.clone(),
+    )
+    .unwrap();
+    assert_eq!(framed_authenticated_data(pending.commit()).1, statement);
+}
+
+#[test]
+fn a_remove_commit_without_authenticated_data_carries_none() {
+    let m = mimi_pair("remove-no-aad");
+    let pending = mimi_remove_member_commit_appsync_pending(
+        m.alice_state.clone(),
+        m.alice.clone(),
+        "bob-remove-no-aad@as.test".into(),
+        vec![0x81, 0x01],
+    )
+    .unwrap();
+    assert!(framed_authenticated_data(pending.commit()).1.is_empty());
 }

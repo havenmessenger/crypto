@@ -694,6 +694,24 @@ pub fn mimi_remove_member_commit_appsync_pending(
     credential_identity: String,
     roster_payload: Vec<u8>,
 ) -> anyhow::Result<PendingCommit> {
+    mimi_remove_member_commit_appsync_pending_with_authenticated_data(
+        group_state_bytes,
+        bundle_bytes,
+        credential_identity,
+        roster_payload,
+        Vec::new(),
+    )
+}
+
+/// [`mimi_remove_member_commit_appsync_pending`], with `authenticated_data` carried in the commit's PublicMessage
+/// framing: covered by the committer's signature and readable by anyone who parses the framing.
+pub fn mimi_remove_member_commit_appsync_pending_with_authenticated_data(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    credential_identity: String,
+    roster_payload: Vec<u8>,
+    authenticated_data: Vec<u8>,
+) -> anyhow::Result<PendingCommit> {
     let mut opened = open_group(group_state_bytes, bundle_bytes)?;
 
     let target_index = opened
@@ -714,6 +732,8 @@ pub fn mimi_remove_member_commit_appsync_pending(
         .group
         .propose_custom_proposal_by_value(&opened.provider, &opened.signer, custom)
         .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
+    // Set after the roster proposal, which would otherwise consume it: the commit is the message that carries it.
+    opened.group.set_aad(authenticated_data);
     let (commit, _welcome, _gi) = opened
         .group
         .commit_builder()
