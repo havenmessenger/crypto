@@ -219,3 +219,43 @@ pub const PGP_SYMMETRIC: SymmetricKeyAlgorithm = SymmetricKeyAlgorithm::AES256;
 pub const fn pgp_symmetric() -> SymmetricKeyAlgorithm {
     PGP_SYMMETRIC
 }
+
+/// A suite data can be sealed in parts under. A sealed stream names its suite by
+/// [`SealedPartsSuite::id`], so a later suite is one more member here with one more id; what an
+/// existing id means never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealedPartsSuite {
+    /// AES-256-GCM in the STREAM construction with a 32-bit big-endian part counter.
+    Aes256GcmStreamBe32,
+}
+
+impl SealedPartsSuite {
+    /// Every suite this build can open.
+    pub const ALL: [Self; 1] = [Self::Aes256GcmStreamBe32];
+
+    /// The number a sealed stream carries to name this suite.
+    #[must_use]
+    pub const fn id(self) -> u16 {
+        match self {
+            Self::Aes256GcmStreamBe32 => 1,
+        }
+    }
+}
+
+/// The suite new data is sealed in parts under.
+pub const SEALED_PARTS_SUITE: SealedPartsSuite = SealedPartsSuite::Aes256GcmStreamBe32;
+
+/// Accessor for the sealed-parts suite - call sites ask the seam, not the inline token.
+#[must_use]
+pub const fn sealed_parts_suite() -> SealedPartsSuite {
+    SEALED_PARTS_SUITE
+}
+
+/// The suite a sealed stream names by `id`. An id this build does not know is refused: a stream
+/// is never opened under a guessed suite.
+pub fn sealed_parts_suite_from_id(id: u16) -> anyhow::Result<SealedPartsSuite> {
+    SealedPartsSuite::ALL
+        .into_iter()
+        .find(|suite| suite.id() == id)
+        .ok_or_else(|| anyhow::anyhow!("sealed-parts suite {id} is not one this build can open"))
+}

@@ -11,6 +11,7 @@ pub mod mls;
 pub mod pake;
 pub mod pgp;
 pub mod profile;
+pub mod sealed_parts;
 pub mod secret_store;
 pub mod suite_policy;
 // (2026-07-03): test-only PQ crypto-agility seam-demo (IETF-126 hackathon PoC).
