@@ -7,20 +7,29 @@
 //!
 //! Each part is one AEAD message. Its nonce is the stream's 7-byte prefix, then the part's position
 //! as four big-endian bytes, then one byte that is 1 for the last part and 0 for every other. A part
-//! therefore opens only at the position it was sealed at, and only with the same last-part flag. A
-//! part that is missing, repeated or moved fails to open where the reader expects it, and a stream
-//! cut short fails at its new end, because the part there was not sealed as the last one.
+//! therefore opens only at the position it was sealed at, and only with the same last-part flag. Bytes
+//! offered at a position they were not sealed at are refused there, and a stream cut short is refused
+//! at its new end when the reader opens that part as the last, because it was not sealed as the last.
 //!
 //! Parts open independently and in any order, so a reader can fetch and check one part without the
-//! others.
+//! others. Sealing and opening keep no record between calls: the same part opens again at its own
+//! position, and nothing here reports that a reader stopped before the last part.
 //!
 //! What the caller owes:
 //! - One key and prefix pair seals ONE stream. Two streams sealed under the same pair repeat nonces,
 //!   which breaks AES-GCM. A fresh random key for every stream meets this whatever the prefix.
-//! - The reader learns which position is the last from somewhere it trusts, and opens that part with
-//!   `last` set. Nothing here tells a reader how many parts a stream has.
+//! - Each position of a stream is sealed ONCE. Sealing other bytes, or other associated data, at a
+//!   position already sealed repeats that part's nonce. A caller that seals a part again, as when an
+//!   interrupted transfer resumes, seals the same bytes under the same associated data or starts a
+//!   new stream under a new key.
+//! - The reader learns how many parts a stream has from somewhere it trusts, opens every one of
+//!   them, and opens the last with `last` set. Nothing here tells a reader how many parts there are.
 //! - `associated_data` is authenticated with every part and stored in none; sealing and opening pass
 //!   the same bytes.
+//! - The suite a stream was sealed under travels with the stream as its id; a reader opens under the
+//!   suite that id names, not under the current default.
+//! - Part lengths are bounded by the caller before a part is sealed or opened; a part is copied
+//!   whole before it is checked.
 
 use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::stream::{NewStream, StreamBE32, StreamPrimitive};
