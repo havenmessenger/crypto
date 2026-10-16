@@ -195,9 +195,32 @@ fn small_order_points() -> Vec<[u8; KEY_LEN]> {
 }
 
 #[test]
-fn a_public_key_of_small_order_refuses_to_seal() {
+fn a_public_key_of_small_order_is_refused_when_it_is_received() {
     for point in small_order_points() {
-        let public = ReaderPublicKey::from_bytes(&point).expect("32 bytes");
+        assert_eq!(
+            ReaderPublicKey::from_bytes(&point).unwrap_err(),
+            ReaderSealError::Key,
+            "{}",
+            hex::encode(point)
+        );
+        // The same point with the unused top bit set is the same point.
+        let mut high = point;
+        high[31] |= 0x80;
+        assert_eq!(
+            ReaderPublicKey::from_bytes(&high).unwrap_err(),
+            ReaderSealError::Key,
+            "{}",
+            hex::encode(high)
+        );
+    }
+    // A genuine key is still accepted.
+    assert!(ReaderPublicKey::from_bytes(pair().public.as_bytes()).is_ok());
+}
+
+#[test]
+fn sealing_to_a_small_order_key_refuses_even_if_one_is_built_around_the_check() {
+    for point in small_order_points() {
+        let public = ReaderPublicKey(point);
         assert!(
             seal(&public, b"info", b"p").is_err(),
             "{}",

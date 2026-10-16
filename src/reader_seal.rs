@@ -10,8 +10,9 @@
 //! - **Suite.** The KEM, KDF and AEAD come from [`reader_seal_suite`]. The key lengths and the derivation are
 //!   X25519's, so a suite whose KEM is anything else is refused.
 //! - **Refusals.** A public key or encapsulated key that is the wrong length, or a point of small order (the DH output
-//!   is all zero, RFC 9180 section 7.1.4), is refused; so is a payload that does not authenticate. A refusal carries
-//!   no key material and does not say which check failed beyond its class.
+//!   is all zero, RFC 9180 section 7.1.4), is refused: a public key when it is received, an encapsulated key when it
+//!   is opened. So is a payload that does not authenticate. A refusal carries no key material and does not say which
+//!   check failed beyond its class.
 //!
 //! Each seal draws fresh randomness, so two seals of the same input differ.
 
@@ -61,12 +62,25 @@ pub enum ReaderSealError {
 pub struct ReaderPublicKey([u8; KEY_LEN]);
 
 impl ReaderPublicKey {
-    /// The key from its 32 bytes; any other length is refused. A point of small order is refused when it is used
-    /// (the DH result is all zero), not here.
+    /// The key from its 32 bytes. Any other length is refused, and so is a point of small order, the same way a seal
+    /// to it would be: a key announced by someone else is refused when it is received, not at the first seal.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ReaderSealError> {
-        <[u8; KEY_LEN]>::try_from(bytes)
-            .map(Self)
-            .map_err(|_| ReaderSealError::Key)
+        let key = <[u8; KEY_LEN]>::try_from(bytes).map_err(|_| ReaderSealError::Key)?;
+        // A throwaway seal runs the KEM's own DH check (RFC 9180 section 7.1.4: an all-zero result is refused), so
+        // no list of small-order encodings is kept here to get wrong. Its output is dropped.
+        hpke(reader_seal_suite())
+            .map_err(|_| ReaderSealError::Key)?
+            .seal(
+                &HpkePublicKey::from(key.as_slice()),
+                &[],
+                &[],
+                &[],
+                None,
+                None,
+                None,
+            )
+            .map_err(|_| ReaderSealError::Key)?;
+        Ok(Self(key))
     }
 
     #[must_use]
