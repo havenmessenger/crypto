@@ -141,6 +141,48 @@ pub struct TargetedSuite {
     pub aead_nn: usize,
 }
 
+/// The HPKE algorithms a reader's long-term key is sealed to (RFC 9180 Base mode): taken from the MLS generation
+/// suite, so one suite id serves both and a future suite is a change in [`mls_generation_suite`]. For suite 0x0001 they
+/// are DHKEM(X25519, HKDF-SHA256) 0x0020, HKDF-SHA256 0x0001 and AES-128-GCM 0x0001. Produced only by
+/// [`reader_seal_suite`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReaderSealSuite {
+    pub hpke_kem: HpkeKemType,
+    pub hpke_kdf: HpkeKdfType,
+    pub hpke_aead: HpkeAeadType,
+}
+
+impl ReaderSealSuite {
+    /// The suite of an MLS ciphersuite.
+    #[must_use]
+    pub const fn of(ciphersuite: Ciphersuite) -> Self {
+        Self {
+            hpke_kem: ciphersuite.hpke_kem_algorithm(),
+            hpke_kdf: ciphersuite.hpke_kdf_algorithm(),
+            hpke_aead: ciphersuite.hpke_aead_algorithm(),
+        }
+    }
+}
+
+/// **The reader-seal suite seam.** Every derivation, seal and open in `reader_seal` asks this, never an inline choice.
+#[must_use]
+// Not `const`: a test build reads a thread-local override here.
+#[allow(clippy::missing_const_for_fn)]
+pub fn reader_seal_suite() -> ReaderSealSuite {
+    #[cfg(test)]
+    if let Some(suite) = READER_SEAL_SUITE_OVERRIDE.with(std::cell::Cell::get) {
+        return suite;
+    }
+    ReaderSealSuite::of(mls_generation_suite())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// When set, the suite [`reader_seal_suite`] returns on this thread, so a test can show a caller reads it.
+    pub(crate) static READER_SEAL_SUITE_OVERRIDE: std::cell::Cell<Option<ReaderSealSuite>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// **The targeted-message suite seam.** Runs the same accept-gate as every other inbound MLS
 /// object, then reads each algorithm from the ciphersuite. A suite added to the accepted set later
 /// flows through here with no change to the targeted-message code. WHY: INV-CRYPTO-AGILITY-001.

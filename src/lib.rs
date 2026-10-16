@@ -11,6 +11,7 @@ pub mod mls;
 pub mod pake;
 pub mod pgp;
 pub mod profile;
+pub mod reader_seal;
 pub mod sealed_parts;
 pub mod secret_store;
 pub mod suite_policy;
