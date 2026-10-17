@@ -143,9 +143,11 @@ pub fn aes_gcm_256_seal(key: Vec<u8>, plaintext: Vec<u8>) -> anyhow::Result<Vec<
     aes_gcm_256_seal_slice(key.as_bytes(), &plaintext)
 }
 
-/// [`aes_gcm_256_seal`] over borrowed bytes. A caller whose plaintext is secret keeps it in its own
-/// zeroizing buffer and lends it here, so sealing makes no copy of it that is freed unwiped.
-pub(crate) fn aes_gcm_256_seal_slice(key: &[u8], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
+/// [`aes_gcm_256_seal`] over borrowed bytes, with the same wire layout and a fresh nonce on every call. A caller whose
+/// plaintext is secret keeps it in its own zeroizing buffer and lends it here, so sealing makes no copy of it that is
+/// freed unwiped. It does not take ownership of `plaintext` and wipes nothing of the caller's: the caller's buffer is
+/// the caller's to wipe.
+pub fn aes_gcm_256_seal_slice(key: &[u8], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("aes_gcm_256_seal: key init failed: {e}"))?;
     let mut rng = rand::rngs::OsRng;
@@ -949,6 +951,25 @@ mod tests {
         );
         let dec = aes_gcm_256_open(key, wire).unwrap();
         assert_eq!(dec, pt, "open recovers the sealed plaintext");
+    }
+
+    /// The borrowed-plaintext seal writes the same wire layout, so the existing open reads it back.
+    #[test]
+    fn aes_gcm_256_seal_slice_output_opens_with_the_existing_open() {
+        let key: Vec<u8> = (0u8..32).collect();
+        let pt = b"a plaintext lent, not handed over";
+        let wire = aes_gcm_256_seal_slice(&key, pt).unwrap();
+        assert_eq!(wire.len(), 12 + pt.len() + 16, "nonce(12)+ct+tag(16)");
+        assert_eq!(aes_gcm_256_open(key.clone(), wire.clone()).unwrap(), pt);
+        let again = aes_gcm_256_seal_slice(&key, pt).unwrap();
+        assert_ne!(wire[..12], again[..12], "a fresh nonce on every call");
+        let mut altered = wire;
+        let last = altered.len() - 1;
+        altered[last] ^= 1;
+        assert!(
+            aes_gcm_256_open(key, altered).is_err(),
+            "a flipped bit does not open"
+        );
     }
 
     /// Two seals of the same (key, plaintext) differ - fresh OsRng nonce each time.
