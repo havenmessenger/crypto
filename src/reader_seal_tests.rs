@@ -30,6 +30,10 @@ mod appendix_a_1_1 {
     pub const SK_R: &str = "4612c550263fc8ad58375df3f557aac531d26850903e55a9f23f21d8534e8ac8";
     pub const AAD_0: &str = "436f756e742d30";
     pub const PT_0: &str = "4265617574792069732074727574682c20747275746820626561757479";
+    /// The same first encryption with no `aad`, which is what this module seals with. Computed from the RFC's inputs
+    /// with a separate implementation of the key schedule; its first 29 bytes are the RFC's, and only the tag differs.
+    pub const CT_0_NO_AAD: &str =
+        "f938558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae821807a370ad4546513b00cf03048f6b793c";
     pub const CT_0: &str = "f938558b5d72f1a23810b4be2ab4f84331acc02fc97babc53a52ae8218a355a96d8770ac83d07bea87e13c512a";
 }
 
@@ -57,11 +61,12 @@ fn derive_key_pair_matches_the_published_vector() {
 }
 
 #[test]
-fn a_seal_with_the_published_ephemeral_gives_the_published_encapsulation_and_message() {
-    // The RFC's first encryption is `seq 0` of the context; a single-shot seal is that first encryption.
+fn a_seal_with_the_published_ephemeral_gives_the_published_encapsulation_and_the_no_aad_ciphertext()
+{
+    // The RFC's first encryption is `seq 0` of the context; a single-shot seal is that first encryption. The RFC
+    // seals with aad "Count-0" and this module has none, so the ciphertext compared is the one for empty aad.
     let public = ReaderPublicKey::from_bytes(&unhex(appendix_a_1_1::PK_R)).expect("key");
-    // The RFC seals with aad "Count-0"; this module has none, so only the encapsulation is compared here.
-    let (enc, _) = with_ephemeral(&unhex(appendix_a_1_1::IKM_E), || {
+    let (enc, ciphertext) = with_ephemeral(&unhex(appendix_a_1_1::IKM_E), || {
         seal(
             &public,
             &unhex(appendix_a_1_1::INFO),
@@ -70,6 +75,20 @@ fn a_seal_with_the_published_ephemeral_gives_the_published_encapsulation_and_mes
         .expect("seals")
     });
     assert_eq!(enc.as_slice(), unhex(appendix_a_1_1::PK_E));
+    assert_eq!(ciphertext, unhex(appendix_a_1_1::CT_0_NO_AAD));
+}
+
+#[test]
+fn the_published_no_aad_ciphertext_opens_through_the_facade() {
+    let secret = ReaderSecretKey::from_bytes(&unhex(appendix_a_1_1::SK_R)).expect("key");
+    let opened = open(
+        &secret,
+        &unhex(appendix_a_1_1::PK_E),
+        &unhex(appendix_a_1_1::INFO),
+        &unhex(appendix_a_1_1::CT_0_NO_AAD),
+    )
+    .expect("opens");
+    assert_eq!(opened.as_slice(), unhex(appendix_a_1_1::PT_0));
 }
 
 #[test]

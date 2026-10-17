@@ -15,6 +15,11 @@
 //!   check failed beyond its class.
 //!
 //! Each seal draws fresh randomness, so two seals of the same input differ.
+//!
+//! **Wiping.** The secret key this module holds, and the labelled key material it derives from a seed, are wiped when
+//! they are dropped. The HPKE provider it calls (`hpke-rs` 0.6.1) keeps some of its own intermediates in ordinary
+//! buffers (the labelled input of its key derivation and the pseudorandom key of `DeriveKeyPair`); those are dropped
+//! without being wiped, and nothing here can reach them.
 
 use hkdf::Hkdf;
 use hpke_rs::{Hpke, HpkePrivateKey, HpkePublicKey, Mode};
