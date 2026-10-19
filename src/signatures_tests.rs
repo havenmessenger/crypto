@@ -1,4 +1,5 @@
-use super::{sign_detached, verify_detached};
+use super::{is_valid_public_key, sign_detached, verify_detached};
+use ed25519_dalek::VerifyingKey;
 
 fn bytes<const N: usize>(value: &str) -> [u8; N] {
     hex::decode(value)
@@ -101,4 +102,76 @@ fn a_small_order_key_and_signature_are_rejected() {
     let mut signature = [0; 64];
     signature[0] = 1;
     assert!(!verify_detached(&identity, b"document", &signature));
+}
+
+#[test]
+fn generated_and_rfc_public_keys_are_valid() {
+    let rfc = bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+    assert!(is_valid_public_key(&rfc));
+    for seed in [[0; 32], [17; 32], [255; 32]] {
+        let (public, signature) = sign_detached(&seed, b"key validation");
+        assert!(is_valid_public_key(&public));
+        assert!(verify_detached(&public, b"key validation", &signature));
+    }
+}
+
+#[test]
+fn invalid_compressed_public_key_is_rejected() {
+    let mut invalid = [0; 32];
+    invalid[0] = 2;
+    assert!(
+        VerifyingKey::from_bytes(&invalid).is_err(),
+        "off-curve fixture"
+    );
+    assert!(!is_valid_public_key(&invalid));
+}
+
+#[test]
+fn small_order_public_keys_are_rejected() {
+    let mut identity = [0; 32];
+    identity[0] = 1;
+    for public in [identity, [0; 32]] {
+        let decoded = VerifyingKey::from_bytes(&public).expect("small-order fixture");
+        assert!(decoded.is_weak());
+        assert!(!is_valid_public_key(&public));
+    }
+}
+
+#[test]
+fn mixed_order_public_key_is_rejected() {
+    let (valid, _) = sign_detached(&[17; 32], b"");
+    let valid = VerifyingKey::from_bytes(&valid)
+        .expect("generated key")
+        .to_edwards();
+    let torsion = VerifyingKey::from_bytes(&[0; 32])
+        .expect("order-four fixture")
+        .to_edwards();
+    let mixed = valid + torsion;
+    let public = mixed.compress().to_bytes();
+    let decoded = VerifyingKey::from_bytes(&public).expect("mixed-order fixture");
+    assert!(!decoded.is_weak());
+    assert!(!mixed.is_torsion_free());
+    assert!(!is_valid_public_key(&public));
+}
+
+#[test]
+fn noncanonical_public_key_encodings_are_rejected() {
+    // ZIP-215 decoding accepts y >= p. Enumerate its nineteen reduced aliases and both signs.
+    let mut decoded_aliases = 0;
+    for low in 0xed..=0xff {
+        for high in [0x7f, 0xff] {
+            let mut public = [0xff; 32];
+            public[0] = low;
+            public[31] = high;
+            if let Ok(decoded) = VerifyingKey::from_bytes(&public) {
+                assert_ne!(decoded.to_edwards().compress().to_bytes(), public);
+                assert!(!is_valid_public_key(&public), "{}", hex::encode(public));
+                decoded_aliases += 1;
+            }
+        }
+    }
+    assert!(
+        decoded_aliases > 0,
+        "exercise the decoder's alias acceptance"
+    );
 }

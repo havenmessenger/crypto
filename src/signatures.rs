@@ -5,6 +5,19 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
+/// Check that a public key has canonical encoding and non-small, prime order.
+///
+/// Keys produced by `sign_detached` satisfy these conditions. Application authorization belongs to
+/// the caller. ZIP-215 point decoding alone also accepts aliases and unusable small-order keys.
+#[must_use]
+pub fn is_valid_public_key(public: &[u8; 32]) -> bool {
+    let Ok(key) = VerifyingKey::from_bytes(public) else {
+        return false;
+    };
+    let point = key.to_edwards();
+    !key.is_weak() && point.is_torsion_free() && point.compress().to_bytes() == *public
+}
+
 /// Sign exact document bytes, returning the public key and detached signature.
 ///
 /// The seed is borrowed; the caller remains responsible for erasing its own seed storage.
