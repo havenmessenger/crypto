@@ -15,6 +15,7 @@ pub fn is_valid_public_key(public: &[u8; 32]) -> bool {
         return false;
     };
     let point = key.to_edwards();
+    // Canonical equality also guards decoder changes; the order checks already reject these aliases.
     !key.is_weak() && point.is_torsion_free() && point.compress().to_bytes() == *public
 }
 
