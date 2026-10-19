@@ -14,6 +14,7 @@ pub mod profile;
 pub mod reader_seal;
 pub mod sealed_parts;
 pub mod secret_store;
+pub mod signatures;
 pub mod suite_policy;
 // (2026-07-03): test-only PQ crypto-agility seam-demo (IETF-126 hackathon PoC).
 // Never compiled into a release build; see suite_policy_pq_demo.rs header for full scope.
