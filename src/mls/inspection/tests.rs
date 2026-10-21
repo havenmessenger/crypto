@@ -218,3 +218,56 @@ fn truncated_storage_maps_and_serialized_snapshots_are_errors_without_unwinding(
     state.storage_map.clear();
     refuses_without_unwinding(&serde_json::to_vec(&state).unwrap());
 }
+
+fn public_commit_pair() -> (Vec<u8>, Vec<u8>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let (_, _, alice) = crate::mimi::mimi_generate_identity("commit-alice".into(), now).unwrap();
+    let (_, bob_package, _) =
+        crate::mimi::mimi_generate_identity("commit-bob".into(), now).unwrap();
+    let initial = crate::mimi::mimi_create_group("commit-room".into(), alice.clone()).unwrap();
+    let (_, _, commit) =
+        crate::mimi::mimi_add_member_commit(initial.clone(), alice, bob_package).unwrap();
+    (initial, commit)
+}
+
+#[test]
+fn a_public_commit_reports_the_group_and_the_epoch_it_starts() {
+    let (initial, commit) = public_commit_pair();
+    let header = inspect_commit_message(&commit).unwrap().unwrap();
+    assert_eq!(header.group_id, b"commit-room");
+    assert_eq!(header.epoch, inspect_group_state(&initial).unwrap().epoch);
+}
+
+#[test]
+fn a_private_commit_reports_its_epoch_and_other_messages_are_not_commits() {
+    let (_, joined, _, message, commit) = pair();
+    let header = inspect_commit_message(&commit).unwrap().unwrap();
+    assert_eq!(header.group_id, b"inspection-room");
+    assert_eq!(
+        header.epoch + 1,
+        inspect_group_state(&joined).unwrap().epoch
+    );
+    assert_eq!(
+        inspect_commit_message(&message).unwrap(),
+        None,
+        "an application message is not a Commit"
+    );
+}
+
+#[test]
+fn commit_inspection_refuses_malformed_trailing_and_oversized_wire() {
+    let (_, commit) = public_commit_pair();
+    let mut trailing = commit.clone();
+    trailing.push(0);
+    for bytes in [
+        vec![],
+        vec![0, 1, 2],
+        trailing,
+        vec![0; crate::mls::MAX_MLS_WIRE_BYTES + 1],
+    ] {
+        assert!(inspect_commit_message(&bytes).is_err());
+    }
+}

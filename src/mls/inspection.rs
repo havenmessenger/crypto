@@ -51,6 +51,34 @@ pub fn inspect_private_message(bytes: &[u8]) -> anyhow::Result<Option<PrivateMes
     }))
 }
 
+/// The clear header of a Commit, public or private, before authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMetadata {
+    pub group_id: Vec<u8>,
+    /// The epoch the Commit is made for, which the group has to be at to apply it.
+    pub epoch: u64,
+}
+
+/// Inspect one complete, size-bounded MLS message and report its header when it is a Commit.
+/// Anything else (an application message, a proposal, a non-protocol object) returns `None`; malformed
+/// input is refused. Nothing here proves a sender: the fields are clear routing metadata only.
+pub fn inspect_commit_message(bytes: &[u8]) -> anyhow::Result<Option<CommitMetadata>> {
+    super::check_wire_size(bytes, "inspect_commit_message")?;
+    let message = std::panic::catch_unwind(|| MlsMessageIn::tls_deserialize_exact(bytes))
+        .map_err(|_| anyhow::anyhow!("Invalid MLS message framing"))?
+        .map_err(|_| anyhow::anyhow!("Invalid MLS message framing"))?;
+    let Ok(protocol) = ProtocolMessage::try_from(message) else {
+        return Ok(None);
+    };
+    if protocol.content_type() != ContentType::Commit {
+        return Ok(None);
+    }
+    Ok(Some(CommitMetadata {
+        group_id: protocol.group_id().to_vec(),
+        epoch: protocol.epoch().as_u64(),
+    }))
+}
+
 /// Public local group metadata and the receive-secret retention configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupStateMetadata {
