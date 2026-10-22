@@ -228,6 +228,32 @@ pub fn mimi_create_group_with_external_senders(
     Ok(crate::mls::zeroizing_json(&state)?.to_vec())
 }
 
+/// Make a MIMI-lane group send its handshake messages (Commits and Proposals) as PrivateMessage from now on, as a
+/// native-lane group does, and change nothing else about it. A member receives either form in both lanes, so the
+/// group's other members need no change.
+pub fn mimi_send_handshake_privately(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
+    let mut configuration = serde_json::to_value(opened.group.configuration())?;
+    configuration["wire_format_policy"] = serde_json::to_value(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)?;
+    let configuration: MlsGroupJoinConfig = serde_json::from_value(configuration)?;
+    opened
+        .group
+        .set_configuration(opened.provider.storage(), &configuration)
+        .map_err(|e| anyhow::anyhow!("Error changing the group's configuration: {:?}", e))?;
+    let storage_map = {
+        let values = opened.provider.storage().values.read().unwrap();
+        values.clone().into_iter().collect()
+    };
+    let state = GroupState {
+        group_id: opened.group.group_id().to_vec(),
+        storage_map,
+    };
+    Ok(crate::mls::zeroizing_json(&state)?.to_vec())
+}
+
 ///
 /// **Deprecated for new callers:** this installs the successor before the group has accepted the
 /// commit. Use [`mimi_add_member_pending`], which returns a [`PendingCommit`] to confirm on acceptance.

@@ -1517,3 +1517,35 @@ fn two_phase_hub_pin_rejection_keeps_the_retirement_durable() {
         "the phase-2 retirement must block replay after a hub rejection"
     );
 }
+
+/// A group set to send handshake messages privately commits as a PrivateMessage, and a member that joined by
+/// Welcome applies it.
+#[test]
+fn a_group_set_to_send_handshake_messages_privately_commits_as_a_private_message() {
+    let now = now_secs();
+    let (_, _, alice) =
+        crate::identity::generate_identity("alice@private.test".to_string(), now).expect("alice");
+    let (_, bob_package, _) =
+        mimi_generate_identity("bob@private.test".to_string(), now).expect("bob");
+    let (_, carol_package, _) =
+        mimi_generate_identity("carol@private.test".to_string(), now).expect("carol");
+    let state = mimi_create_group("private-handshake".into(), alice.clone()).expect("group");
+    let (_, _, public_commit) =
+        mimi_add_member_commit(state.clone(), alice.clone(), bob_package).expect("public commit");
+    assert!(
+        crate::mls::inspection::inspect_private_message(&public_commit)
+            .expect("reads")
+            .is_none()
+    );
+    let private_state =
+        mimi_send_handshake_privately(state, alice.clone()).expect("private posture");
+    let (_, _, private_commit) =
+        mimi_add_member_commit(private_state, alice, carol_package).expect("private commit");
+    assert_eq!(
+        crate::mls::inspection::inspect_private_message(&private_commit)
+            .expect("reads")
+            .expect("a private message")
+            .content_type,
+        crate::mls::inspection::PrivateContentType::Commit
+    );
+}
