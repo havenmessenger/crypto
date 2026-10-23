@@ -67,6 +67,7 @@ pub enum SecretStoreError {
     #[error("no such session (locked, never unlocked, or already torn down)")]
     NoSuchSession,
     /// The session holds no PGP identity yet - call `set_pgp_identity` first.
+    #[cfg(feature = "pgp")]
     #[error("session holds no PGP identity (call set_pgp_identity first)")]
     NoPgpIdentity,
     /// The underlying HKDF / AES-GCM / PGP op failed (bad tag, malformed wire, wrong passphrase…).
@@ -93,6 +94,8 @@ pub enum SecretStoreError {
 /// caller's `Vec<u8>`) and NEVER grown / pushed → its backing allocation never reallocates → no
 /// orphaned pre-realloc copy can survive un-wiped.
 #[derive(Zeroize, ZeroizeOnDrop)]
+// Without OpenPGP every remaining field is a key, which is what each of them holds.
+#[cfg_attr(not(feature = "pgp"), allow(clippy::struct_field_names))]
 struct SessionSecrets {
     /// The session root key the handle ops derive per-blob subkeys from (the value the client's
     /// managed-language layer held un-wipeably before this store existed).
@@ -112,8 +115,10 @@ struct SessionSecrets {
     vault_master_key: Option<Vec<u8>>,
     /// The PGP private key (ASCII-armored), set lazily via `set_pgp_identity` (the identity key is
     /// loaded after unlock in the real flow). `None` until set; `pgp_decrypt` fails closed until set.
+    #[cfg(feature = "pgp")]
     pgp_private_key_armored: Option<String>,
     /// The PGP key's at-rest passphrase (INV-KEY-001). `None` until `set_pgp_identity`.
+    #[cfg(feature = "pgp")]
     pgp_passphrase: Option<String>,
 }
 
@@ -184,7 +189,9 @@ pub fn unlock(master_root_key: Vec<u8>) -> Result<SessionId, SecretStoreError> {
             master_root_key,
             cipher_store_root_key: None,
             vault_master_key: None,
+            #[cfg(feature = "pgp")]
             pgp_private_key_armored: None,
+            #[cfg(feature = "pgp")]
             pgp_passphrase: None,
         },
     );
@@ -196,6 +203,7 @@ pub fn unlock(master_root_key: Vec<u8>) -> Result<SessionId, SecretStoreError> {
 /// the session does not exist. A SECOND call (re-set) zeroizes the outgoing OLD value before it
 /// drops - `Option::replace` returns the previous value instead of letting the assignment silently
 /// drop it unwiped, which is what plain `entry.field = Some(new)` would do.
+#[cfg(feature = "pgp")]
 pub fn set_pgp_identity(
     id: SessionId,
     private_key_armored: String,
@@ -563,6 +571,7 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<Vec<u8>, SecretStoreError> {
 /// Decrypt an armored PGP message with the session's custodied PGP identity. Fails closed if no
 /// identity was set. Delegates to `pgp_decrypt_unauthenticated_impl` (the privkey + passphrase
 /// never leave Rust) - does not check any embedded signature, same caveat as that function.
+#[cfg(feature = "pgp")]
 pub fn pgp_decrypt(id: SessionId, encrypted_armored: String) -> Result<String, SecretStoreError> {
     // Extract the PGP identity and DROP the registry lock before the (slower) PGP decrypt - the
     // global custody mutex must not be held across rPGP work. `pgp_decrypt_unauthenticated_impl`

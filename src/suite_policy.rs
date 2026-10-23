@@ -24,6 +24,7 @@ use openmls::prelude::{Ciphersuite, KeyPackage, Welcome};
 use openmls_traits::types::{
     AeadType, HashType, HpkeAeadType, HpkeKdfType, HpkeKemType, SignatureScheme,
 };
+#[cfg(feature = "pgp")]
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use tls_codec::Serialize as TlsSerialize;
 
@@ -217,6 +218,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pgp")]
     #[test]
     fn test_pgp_symmetric_is_aes256() {
         assert_eq!(pgp_symmetric(), SymmetricKeyAlgorithm::AES256);
@@ -254,9 +256,11 @@ mod tests {
 /// The symmetric algorithm Haven uses for `OpenPGP` message encryption (AES-256). Decryption
 /// needs no seam - `OpenPGP` packets are self-describing, so rPGP reads the algorithm from the
 /// message.
+#[cfg(feature = "pgp")]
 pub const PGP_SYMMETRIC: SymmetricKeyAlgorithm = SymmetricKeyAlgorithm::AES256;
 
 /// Accessor for the PGP symmetric algorithm - call sites ask the seam, not the inline token.
+#[cfg(feature = "pgp")]
 #[must_use]
 pub const fn pgp_symmetric() -> SymmetricKeyAlgorithm {
     PGP_SYMMETRIC

@@ -214,14 +214,17 @@ fn ops_fail_closed_after_lock() {
         decrypt_blob(id, info, wire),
         Err(SecretStoreError::NoSuchSession)
     ));
-    assert!(matches!(
-        pgp_decrypt(id, "x".to_string()),
-        Err(SecretStoreError::NoSuchSession)
-    ));
-    assert!(matches!(
-        set_pgp_identity(id, "k".to_string(), "p".to_string()),
-        Err(SecretStoreError::NoSuchSession)
-    ));
+    #[cfg(feature = "pgp")]
+    {
+        assert!(matches!(
+            pgp_decrypt(id, "x".to_string()),
+            Err(SecretStoreError::NoSuchSession)
+        ));
+        assert!(matches!(
+            set_pgp_identity(id, "k".to_string(), "p".to_string()),
+            Err(SecretStoreError::NoSuchSession)
+        ));
+    }
 }
 
 #[test]
@@ -236,6 +239,7 @@ fn fresh_id_for_test() -> SessionId {
     super::fresh_id()
 }
 
+#[cfg(feature = "pgp")]
 #[test]
 fn pgp_decrypt_fails_closed_without_identity() {
     let id = unlock(root_a()).unwrap();
@@ -248,6 +252,7 @@ fn pgp_decrypt_fails_closed_without_identity() {
 
 // ── PGP round-trip through the store ─────────────────────────────────────────
 
+#[cfg(feature = "pgp")]
 #[test]
 fn pgp_round_trip_via_handle() {
     let (public_armored, private_armored) =
@@ -267,6 +272,7 @@ fn pgp_round_trip_via_handle() {
 /// field assignment that would drop the old `String` unwiped). Proven functionally: after the
 /// replace, a ciphertext encrypted to the OLD identity must fail (the old private key is gone from
 /// the store), and a ciphertext encrypted to the NEW identity must succeed.
+#[cfg(feature = "pgp")]
 #[test]
 fn set_pgp_identity_replace_wipes_old_identity() {
     let (pub_old, priv_old) =

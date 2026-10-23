@@ -9,6 +9,7 @@ pub mod mime;
 pub mod mimi;
 pub mod mls;
 pub mod pake;
+#[cfg(feature = "pgp")]
 pub mod pgp;
 pub mod profile;
 pub mod reader_seal;

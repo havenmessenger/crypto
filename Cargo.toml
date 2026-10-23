@@ -33,7 +33,7 @@ serde_json = "1.0.149"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 tls_codec = { version = "0.4.2", features = ["derive", "mls"] }
 chrono = { version = "0.4", features = ["clock"] }
-pgp = { version = "0.14", default-features = false, features = ["wasm"] }
+pgp = { version = "0.14", default-features = false, features = ["wasm"], optional = true }
 rand = { version = "0.8" }
 rand_chacha = { version = "0.3" }
 ed25519-dalek = { version = "2" }
@@ -57,6 +57,16 @@ subtle = "2"
 hpke-rs = { version = "=0.6.1", default-features = false, features = ["hazmat", "serialization"] }
 hpke-rs-crypto = "=0.6.1"
 hpke-rs-rust-crypto = "=0.6.1"
+
+[features]
+# OpenPGP (the `pgp` module, the PGP symmetric seam and the secret store's PGP identity). On by
+# default; a consumer that never uses OpenPGP turns it off and leaves rPGP and its RSA out of its build.
+default = ["pgp"]
+pgp = ["dep:pgp"]
+
+[[example]]
+name = "pgp_roundtrip"
+required-features = ["pgp"]
 
 [dev-dependencies]
 # Test builds only. They let a test pin the HPKE ephemeral randomness, so a sealed message can be
