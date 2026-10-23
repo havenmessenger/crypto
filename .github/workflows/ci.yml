@@ -43,6 +43,11 @@ jobs:
       - name: test
         # guard #2: this job IS the standalone clean-room build (fresh checkout, nothing else present)
         run: cargo test
+      - name: clippy without OpenPGP
+        # A consumer that turns the default `pgp` feature off still gets a crate that builds lint-clean.
+        run: cargo clippy --lib --no-default-features -- -D warnings
+      - name: test without OpenPGP
+        run: cargo test --no-default-features
       - name: audit
         # `cargo audit` auto-reads .cargo/audit.toml if present, so documented advisory
         # dispositions (e.g. the RSA Marvin / libcrux-phantom notes) apply.
