@@ -79,6 +79,14 @@ target additionally needs `nightly-2026-03-28` - see
 [`docs/REPRODUCIBLE_BUILDS.md`](docs/REPRODUCIBLE_BUILDS.md) for why, and for the full repro
 recipe.
 
+### Cargo features
+OpenPGP support is the `pgp` feature, on by default: the `pgp` module, the PGP symmetric
+algorithm in `suite_policy`, and the secret store's PGP identity (`set_pgp_identity`,
+`pgp_decrypt`). A consumer that only needs the MLS and key-custody side can depend on the
+crate with `default-features = false`; rPGP and the RSA implementation it brings in then stay
+out of that consumer's build. `cargo test --no-default-features` runs every test that does not
+involve OpenPGP.
+
 ## License
 Copyright 2026 The Haven Authors. Licensed under
 [AGPL-3.0-or-later](LICENSE), with an additional permission under section 7 that makes distribution
