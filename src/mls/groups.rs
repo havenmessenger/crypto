@@ -375,7 +375,7 @@ pub(crate) fn decrypt_in(
 
     let processed_message = group
         .process_message(provider, message)
-        .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+        .map_err(|e| anyhow::Error::new(crate::mls::ProcessingError::new(e)))?;
 
     // Surface the sender openmls just authenticated, before into_content() consumes the
     // processed message. An application message does not change membership, so the sender's

@@ -9,9 +9,12 @@ pub mod entry_codec;
 pub mod groups;
 pub mod inspection;
 pub mod pending;
+pub mod processing_error;
 pub mod store;
 pub mod stored;
 pub mod targeted;
+
+pub use processing_error::ProcessingError;
 
 pub use pending::{
     AbandonedGroupState, CommitAcceptance, ConfirmRefused, ConfirmedGroupState, PendingCommit,
