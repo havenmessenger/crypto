@@ -87,6 +87,22 @@ ignore = [
     "RUSTSEC-2026-0208",
     "RUSTSEC-2026-0212",
 
+    # RUSTSEC-2026-0387 - `crypto-bigint` 0.5.5: subtraction, zero counting, division and Montgomery
+    # multiplication can branch on secret values depending on compiler and CPU (fix >=0.7.6).
+    # Chain: crypto-bigint <- elliptic-curve 0.13.8 <- {p256, p384, p521, k256, ecdsa, primeorder} <-
+    # {pgp 0.14.2, hpke-rs-rust-crypto 0.6.1, openmls_rust_crypto 0.5.1} <- crypto-core. COMPILED. No
+    # upgrade is reachable: every dependent pins the elliptic-curve 0.13 family, and 0.7.6 needs 0.14.
+    # Disposition: ACCEPTED-RISK - the leak needs secret integers on the NIST/secp curves, and this crate's
+    # own secrets never take that path. Keys it generates are Ed25519 + Curve25519 ECDH or RSA
+    # (`pgp/mod.rs` key types); MLS is pinned to `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` for
+    # generation and refused otherwise at the inbound gate (`suite_policy.rs`), so hpke-rs and openmls never
+    # run P-curve arithmetic on this crate's keys. What remains: encrypting to a correspondent's NIST-curve
+    # OpenPGP key uses a one-time ephemeral scalar, and decrypting with a NIST-curve secret key a caller
+    # supplies runs on that caller's device. Both need a local timing or microarchitectural observer on the
+    # device during the operation; nothing here returns operation timing to a remote party. Re-evaluate when
+    # pgp, openmls_rust_crypto and hpke-rs move to elliptic-curve 0.14.
+    "RUSTSEC-2026-0387",
+
     # ── RETAINED DEFENSIVELY - not currently in this crate's resolved tree. Kept so a transitive
     #    re-introduction (an openmls/dep bump) stays covered without a silent regression. Prune only
     #    after confirming the dependency that would pull them in is gone for good. ──────────────────
