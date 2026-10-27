@@ -3,7 +3,7 @@
 use std::fmt;
 
 pub use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
-pub use openmls::prelude::{ProcessMessageError, ValidationError};
+pub use openmls::prelude::{MlsGroupStateError, ProcessMessageError, ValidationError};
 use openmls_rust_crypto::MemoryStorageError;
 
 /// The MLS implementation's refusal of a message given to [`crate::mls::groups::decrypt_message`].
