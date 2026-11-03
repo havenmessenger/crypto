@@ -8,12 +8,14 @@
 pub mod entry_codec;
 pub mod groups;
 pub mod inspection;
+pub mod own_message;
 pub mod pending;
 pub mod processing_error;
 pub mod store;
 pub mod stored;
 pub mod targeted;
 
+pub use own_message::OwnMessage;
 pub use processing_error::ProcessingError;
 
 pub use pending::{

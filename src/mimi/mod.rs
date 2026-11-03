@@ -501,6 +501,9 @@ pub fn mimi_accept_external_remove_proposal_pending(
                 "Expected a staged proposal, got a StagedCommitMessage"
             ))
         }
+        ProcessedMessageContent::OwnPendingCommit | ProcessedMessageContent::OwnPrivateMessage => {
+            return Err(anyhow::Error::new(crate::mls::OwnMessage))
+        }
     };
 
     // INV-MLS-001b clause 2(b): sender must be the group's ONE pre-configured external sender.
@@ -805,9 +808,11 @@ pub fn mls_process_commit_appsync(
     let message_in = MlsMessageIn::tls_deserialize_exact(commit_bytes.as_slice())?;
     let message = ProtocolMessage::try_from(message_in)
         .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
+    crate::mls::own_message::refuse_own_sender(&group, &message)?;
     let processed = group
         .process_message(&provider, message)
         .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+    crate::mls::own_message::refuse_own_content(&processed)?;
     // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
     // consumes the processed message. On the MIMI lane this is the sender an Add's authorization is
     // decided against, so it is the verified leaf key rather than any identity the payload claims.

@@ -372,10 +372,12 @@ pub(crate) fn decrypt_in(
     let message_in = MlsMessageIn::tls_deserialize_exact(ciphertext)?;
     let message = ProtocolMessage::try_from(message_in)
         .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
+    crate::mls::own_message::refuse_own_sender(&group, &message)?;
 
     let processed_message = group
         .process_message(provider, message)
         .map_err(|e| anyhow::Error::new(crate::mls::ProcessingError::new(e)))?;
+    crate::mls::own_message::refuse_own_content(&processed_message)?;
 
     // Surface the sender openmls just authenticated, before into_content() consumes the
     // processed message. An application message does not change membership, so the sender's
@@ -1016,9 +1018,11 @@ pub fn mls_process_commit(
     let message_in = MlsMessageIn::tls_deserialize_exact(commit_bytes.as_slice())?;
     let message = ProtocolMessage::try_from(message_in)
         .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
+    crate::mls::own_message::refuse_own_sender(&group, &message)?;
     let processed = group
         .process_message(&provider, message)
         .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+    crate::mls::own_message::refuse_own_content(&processed)?;
     // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
     // consumes the processed message and before the commit changes membership - the committer is a
     // current member now and its leaf may move or be removed once the commit applies.

@@ -87,9 +87,12 @@ pub struct GroupStateMetadata {
     pub max_past_epochs: usize,
 }
 
-// The provider configuration is serializable but has no public retention getter.
+// The provider configuration is serializable but has no public retention getter. The setting is
+// stored as `past_epoch_deletion_policy` and was stored as `max_past_epochs` before; both are a count,
+// with "keep all" written as `usize::MAX`.
 #[derive(serde::Deserialize)]
 struct RetentionConfig {
+    #[serde(alias = "past_epoch_deletion_policy")]
     max_past_epochs: usize,
 }
 

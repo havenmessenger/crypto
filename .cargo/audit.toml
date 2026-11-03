@@ -23,74 +23,28 @@ ignore = [
     # vetted primitives" invariant, so the disposition is accepted-risk, not a code change.
     "RUSTSEC-2023-0071",
 
-    # RUSTSEC-2026-0124 - `libcrux-chacha20poly1305` 0.0.7 panic on overlong ciphertext (HIGH 8.2).
-    # NON-ACTIVATED LOCKFILE PHANTOM: resolves into Cargo.lock as an OPTIONAL backend dependency of
-    # `libcrux-aead` (an optional hpke-rs backend), but that backend feature is NOT enabled - this crate
-    # uses the RustCrypto backend (`openmls_rust_crypto` -> `hpke-rs-rust-crypto`). Verified:
-    # `cargo tree -i libcrux-chacha20poly1305` and `-i libcrux-aead` print NOTHING under default /
-    # --all-features / --target all, so the crate is never compiled or linked. The AEAD this crate
-    # actually drives for a ChaCha suite is RustCrypto `chacha20poly1305` 0.10.1 (not vulnerable). No
-    # upstream bump is possible regardless - `hpke-rs-libcrux` 0.6.1 hard-pins `libcrux-aead = "=0.0.7"`
-    # - and there is zero gain in bumping a crate that never compiles. Re-evaluate if the libcrux hpke-rs
-    # backend is ever activated.
-    "RUSTSEC-2026-0124",
-
-    # RUSTSEC-2024-0384 - `instant` 0.1.13 unmaintained (warning).
-    # Chain: instant <- parking_lot 0.11.2 <- fluvio-wasm-timer <- openmls 0.8.1. Non-security time
-    # helper; clears when openmls's parking_lot dependency bumps.
-    "RUSTSEC-2024-0384",
-
     # RUSTSEC-2026-0173 - `proc-macro-error2` 2.0.1 unmaintained (warning).
-    # Chain: proc-macro-error2 <- hax-lib-macros <- (libcrux verification toolchain) <- openmls_rust_crypto.
-    # BUILD-TIME proc-macro only - not present in the shipped library artifact.
+    # Chain: proc-macro-error2 <- hax-lib-macros 0.3.7 <- hax-lib <- (libcrux verification toolchain).
+    # `cargo tree -i proc-macro-error2 -e normal` prints nothing; it resolves only under --all-features
+    # --target all. BUILD-TIME proc-macro only - not present in the shipped library artifact.
     "RUSTSEC-2026-0173",
-
-    # RUSTSEC-2026-0209 - `libcrux-aesgcm` 0.0.7: AES-GCM did not enforce limits on AAD length (MEDIUM
-    # 6.3, no fixed upgrade available).
-    # RUSTSEC-2026-0211 - `libcrux-aesgcm` 0.0.7: non-constant-time authentication tag check in AES-GCM
-    # decryption (MEDIUM 6.3, no fixed upgrade available).
-    # RUSTSEC-2026-0210 - `libcrux-aesgcm` 0.0.7: unmaintained, renamed to `libcrux-aes` (warning).
-    # NON-ACTIVATED LOCKFILE PHANTOM, same class as RUSTSEC-2026-0124 above. `cargo tree -i
-    # libcrux-aesgcm` (and `-i libcrux-aead`, its only listed dependent) print NOTHING under default /
-    # --all-features / --target all - neither crate is compiled or linked. This crate's AES-GCM path
-    # runs through RustCrypto `aes-gcm` 0.10.3 via `openmls_rust_crypto` (confirmed with `cargo tree -p
-    # openmls_rust_crypto`). No upgrade or rename-follow is warranted for a crate that never compiles.
-    # Re-evaluate if the libcrux hpke-rs backend is ever activated.
-    "RUSTSEC-2026-0209",
-    "RUSTSEC-2026-0211",
-    "RUSTSEC-2026-0210",
 
     # RUSTSEC-2026-0330 - `libcrux-kem` 0.0.7: hybrid encapsulation from a seed panics on a short seed.
     # RUSTSEC-2026-0331 - `libcrux-kem` 0.0.7: panic on decoding short hybrid keys (fixed in 0.0.10).
-    # NON-ACTIVATED LOCKFILE PHANTOM, same class as RUSTSEC-2026-0209 above. `cargo tree -i libcrux-kem` and
-    # `-i hpke-rs-libcrux`, its only dependent, print NOTHING under default / --all-features / --target all /
-    # -e all: the libcrux hpke-rs backend is never compiled, and no newer hpke-rs-libcrux exists to move the lock
-    # to 0.0.10. Re-evaluate if that backend is ever activated.
+    # NON-ACTIVATED LOCKFILE PHANTOM. The lock holds libcrux-kem 0.0.9 as an optional dependency of the
+    # libcrux hpke-rs backend, which this crate never enables (it uses the RustCrypto backend through
+    # `openmls_rust_crypto` -> `hpke-rs-rust-crypto`). `cargo tree -i libcrux-kem` and `-i hpke-rs-libcrux`,
+    # its only dependent, print NOTHING under default / --all-features / --target all: the crate is never
+    # compiled or linked. `hpke-rs-libcrux` 0.7.0, the version `openmls_rust_crypto` 0.6.0's hpke-rs 0.7
+    # resolves, pins `libcrux-kem = "=0.0.9"`; the fixed 0.0.10 needs hpke-rs 0.8. Re-evaluate if that
+    # backend is ever activated or openmls_rust_crypto moves to hpke-rs 0.8.
     "RUSTSEC-2026-0330",
     "RUSTSEC-2026-0331",
-
-    # RUSTSEC-2026-0207 - `libcrux-sha3` 0.0.8: incorrect output of the incremental portable SHAKE API on
-    # multiple squeeze calls (HIGH 8.2, fix >=0.0.10).
-    # RUSTSEC-2026-0208 - `libcrux-sha3` 0.0.8: potential panic in the AVX2 SHAKE-256 path (HIGH 8.2, fix
-    # >=0.0.10).
-    # RUSTSEC-2026-0212 - `libcrux-secrets` 0.0.5: potentially incorrect constant-time swap/select on
-    # aarch64 (HIGH 8.2, fix >=0.0.6).
-    # COMPILED, BUT THE AFFECTED API IS NEVER CALLED. `libcrux-sha3` and `libcrux-secrets` (via
-    # `libcrux-traits`) are real dependencies of `hpke-rs`, itself a dependency of `openmls_rust_crypto` -
-    # but `hpke-rs`'s only call into either crate (`kem.rs`'s `derive_key_pair`) is confined to its
-    # X-Wing and ML-KEM key-encapsulation branches. This crate pins its ciphersuite to
-    # `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` on both generation and the accept-gates in
-    # `suite_policy.rs`, which resolves to `KemAlgorithm::DhKem25519` - a separate code path that never
-    # reaches the SHAKE call. `openmls_rust_crypto`'s own X-Wing key-encapsulation conversion is
-    # `unimplemented!()`. Re-evaluate if this crate ever adds a PQ/hybrid ciphersuite.
-    "RUSTSEC-2026-0207",
-    "RUSTSEC-2026-0208",
-    "RUSTSEC-2026-0212",
 
     # RUSTSEC-2026-0387 - `crypto-bigint` 0.5.5: subtraction, zero counting, division and Montgomery
     # multiplication can branch on secret values depending on compiler and CPU (fix >=0.7.6).
     # Chain: crypto-bigint <- elliptic-curve 0.13.8 <- {p256, p384, p521, k256, ecdsa, primeorder} <-
-    # {pgp 0.14.2, hpke-rs-rust-crypto 0.6.1, openmls_rust_crypto 0.5.1} <- crypto-core. COMPILED. No
+    # {pgp 0.14.2, hpke-rs-rust-crypto 0.7.0, openmls_rust_crypto 0.6.0} <- crypto-core. COMPILED. No
     # upgrade is reachable: every dependent pins the elliptic-curve 0.13 family, and 0.7.6 needs 0.14.
     # Disposition: ACCEPTED-RISK - the leak needs secret integers on the NIST/secp curves, and this crate's
     # own secrets never take that path. Keys it generates are Ed25519 + Curve25519 ECDH or RSA
@@ -120,8 +74,8 @@ ignore = [
 ]
 
 # `num-bigint` 0.4.7 is flagged YANKED (a crates.io publisher action, not a RUSTSEC advisory - it
-# has no ID to list above). Chain: num-bigint <- hax-lib <- (the same libcrux formal-verification
-# toolchain as RUSTSEC-2026-0173) <- openmls_rust_crypto. Verified: `cargo tree -i num-bigint`
+# has no ID to list above). Chain: num-bigint <- hax-lib 0.3.7 <- (the same libcrux formal-verification
+# toolchain as RUSTSEC-2026-0173). Verified: `cargo tree -i num-bigint`
 # prints nothing under the default feature set - it resolves only under --all-features --target
 # all, i.e. it is build-time verification tooling, not part of this crate's compiled output. `cargo
 # audit` treats a yanked-crate warning as non-blocking by default (exit 0); documented here so the

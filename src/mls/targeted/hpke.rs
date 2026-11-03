@@ -26,15 +26,14 @@ thread_local! {
 #[derive(Debug)]
 pub(super) struct HpkeFailure;
 
-const fn kem(kem: HpkeKemType) -> Option<KemAlgorithm> {
-    Some(match kem {
+const fn kem(kem: HpkeKemType) -> KemAlgorithm {
+    match kem {
         HpkeKemType::DhKemP256 => KemAlgorithm::DhKemP256,
         HpkeKemType::DhKemP384 => KemAlgorithm::DhKemP384,
         HpkeKemType::DhKemP521 => KemAlgorithm::DhKemP521,
         HpkeKemType::DhKem25519 => KemAlgorithm::DhKem25519,
         HpkeKemType::DhKem448 => KemAlgorithm::DhKem448,
-        HpkeKemType::XWingKemDraft6 => return None,
-    })
+    }
 }
 
 const fn kdf(kdf: HpkeKdfType) -> KdfAlgorithm {
@@ -57,7 +56,7 @@ const fn aead(aead: HpkeAeadType) -> Option<AeadAlgorithm> {
 fn hpke(suite: &TargetedSuite) -> Option<Hpke<HpkeRustCrypto>> {
     Some(Hpke::new(
         Mode::Psk,
-        kem(suite.hpke_kem)?,
+        kem(suite.hpke_kem),
         kdf(suite.hpke_kdf),
         aead(suite.hpke_aead)?,
     ))
