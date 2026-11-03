@@ -89,9 +89,9 @@ pub fn keypackage_suite_u16(kp: &KeyPackage) -> u16 {
     u16::from(kp.ciphersuite())
 }
 
-/// The u16 wire ciphersuite of an extracted `Welcome`. `Welcome::ciphersuite()` is `pub(crate)` in
-/// openmls 0.8.1 (not callable from our crate), so - as `mimi_core::gate::mimi_gate_welcome`
-/// does - we re-serialize and read the leading big-endian u16: per RFC 9420 the `Welcome` struct is
+/// The u16 wire ciphersuite of an extracted `Welcome`, read from its serialized bytes and not from the library's accessor, as
+/// `mimi_core::gate::mimi_gate_welcome` does: the gate then rests on the wire layout and not on how a library release represents a
+/// `Welcome`. We re-serialize and read the leading big-endian u16: per RFC 9420 the `Welcome` struct is
 /// `{ CipherSuite cipher_suite; EncryptedGroupSecrets secrets<V>; opaque encrypted_group_info<V>; }`,
 /// so the first two bytes ARE the ciphersuite. (mimi-core's `welcome_suite_layout` test pins this so
 /// an openmls wire change can't silently defeat the gate; our flow KATs cross-check it - a wrong
