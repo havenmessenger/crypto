@@ -19,7 +19,7 @@ inspected and verified by anyone, not taken on faith.
 - **One core, every platform.** The same crate compiles native (Android, iOS, desktop) and
   to WASM (web), so the cryptography is byte-identical across platforms rather than
   reimplemented per platform.
-- **Known-answer discipline.** 172 tests gate every change: KATs against published RFC and
+- **Known-answer discipline.** Tests gate every change: KATs against published RFC and
   NIST vectors, fail-closed proofs, and zeroize-on-drop proofs.
 - **Vetted primitives only.** openmls (MLS, [RFC 9420](https://www.rfc-editor.org/rfc/rfc9420)),
   rPGP ([RFC 4880](https://www.rfc-editor.org/rfc/rfc4880)), and the RustCrypto suite (AES-GCM,
@@ -64,9 +64,9 @@ cargo build
 cargo test --release
 ```
 No submodules, no external services, no network access beyond crates.io during the initial
-dependency fetch. A clean build + full test run (172 tests: known-answer vectors against
-published RFC/NIST test data, plus fail-closed and zeroize proofs) takes about two minutes on
-a typical machine. Known-answer tests are the gate for any change - see `CONTRIBUTING.md`.
+dependency fetch. A clean build + full test run (known-answer vectors against published RFC/NIST
+test data, plus fail-closed and zeroize proofs) takes about two minutes on a typical machine.
+Known-answer tests are the gate for any change - see `CONTRIBUTING.md`.
 
 ```sh
 cargo run --example pgp_roundtrip  # generate two keypairs, sign and encrypt a message, then
@@ -82,7 +82,7 @@ recipe.
 ## License
 Copyright 2026 The Haven Authors. Licensed under
 [AGPL-3.0-or-later](LICENSE), with an additional permission under section 7 that makes distribution
-through application distribution platforms possible — see
+through application distribution platforms possible - see
 [ADDITIONAL-PERMISSIONS.md](ADDITIONAL-PERMISSIONS.md). The interoperability library
 ([havenmessenger/interop](https://github.com/havenmessenger/interop)) is Apache-2.0.
 

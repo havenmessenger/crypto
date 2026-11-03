@@ -9,7 +9,7 @@ Please also follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 - **No hand-rolled cryptography.** Build on vetted, well-reviewed primitives only.
 - **Known-answer tests (KATs) must stay green.** Any change touching crypto must keep the
   test vectors passing - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module map,
-  and run `cargo test --release` (172 tests) before opening a PR.
+  and run `cargo test --release` before opening a PR.
 - **`unsafe` is justified or absent.** Every `unsafe` block needs a documented rationale.
 - **Reproducibility is preserved.** Changes must not break the reproducible build.
 

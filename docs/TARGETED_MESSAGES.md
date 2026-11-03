@@ -99,7 +99,7 @@ openmls keeps the private half of a leaf encryption key private to itself; the s
 it is the storage provider. `mls::targeted::leaf_key` reads the stored key pair through openmls's
 storage traits into a private, read-only mirror of the stored layout (it cannot be serialized back), uses
 it for one HPKE open, and wipes it. No public function returns it. The mirror follows the layout used
-with openmls 0.8.1; tests pin that version and round-trip a real key, so an upgrade or layout change fails
+with openmls 0.9.2; tests pin that version and round-trip a key, so an upgrade or layout change fails
 loudly and forces a review.
 
 ## Test evidence
