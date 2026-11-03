@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 The Haven Authors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Tests that this checkout of crypto-core reads group and identity state the previous openmls release
+# wrote, that its own state reads back under that release, and that members on the two releases share
+# one group. The previous release runs as ../previous, a separate process. See ../README.md.
+
+[package]
+name = "openmls-cross-version"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[workspace]
+
+[dev-dependencies]
+crypto-core = { path = "../../.." }
+serde_json = "1"
+hex = "0.4"
+anyhow = "1"

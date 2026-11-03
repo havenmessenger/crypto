@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 The Haven Authors
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# crypto-core as it was on openmls 0.8.1, driven one operation at a time over stdin and stdout by
+# ../current. It is a separate build because the two openmls releases pin incompatible versions of a
+# shared dependency (hax-lib), so they cannot be linked into one binary.
+
+[package]
+name = "previous-driver"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+
+[workspace]
+
+[dependencies]
+# The last crypto-core revision on openmls 0.8.1.
+crypto-core = { git = "https://github.com/havenmessenger/crypto", rev = "4b02ef21841ac8274e47a152f3886543cea5cdc1" }
+# Exactly the openmls release that revision locks; a git dependency does not carry its lockfile.
+openmls = "=0.8.1"
+serde_json = "1"
+hex = "0.4"
+anyhow = "1"

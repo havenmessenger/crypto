@@ -578,6 +578,70 @@ fn one_pending_commit_always_confirms_to_the_same_state() {
     );
 }
 
+/// Removes every `added_at` field, the time openmls stored a retained epoch's secrets.
+fn without_stored_times(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("added_at");
+            map.values_mut().for_each(without_stored_times);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(without_stored_times),
+        _ => {}
+    }
+}
+
+/// What two confirmations of one pending commit differ in is only the time each stored its retained
+/// epoch secrets: every stored entry is the same, and the message-secrets entry is the same once that
+/// time is removed. No secret, epoch or member differs.
+#[test]
+fn two_confirmations_differ_only_in_the_time_the_retained_secrets_were_stored() {
+    let m = mimi_pair("stored-time");
+    let (carol_kp, _) = mimi_kp("carol-stored-time");
+    let mut pending =
+        mimi_add_member_commit_pending(m.alice_state.clone(), m.alice, carol_kp).unwrap();
+    pending.bind_submission(SUBMISSION).unwrap();
+    let durable = pending.to_bytes().unwrap();
+    let first: GroupState = serde_json::from_slice(&confirm(
+        PendingCommit::from_bytes(&durable).unwrap(),
+        &m.alice_state,
+    ))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let second: GroupState = serde_json::from_slice(&confirm(
+        PendingCommit::from_bytes(&durable).unwrap(),
+        &m.alice_state,
+    ))
+    .unwrap();
+
+    assert_eq!(first.group_id, second.group_id);
+    let keys = |state: &GroupState| {
+        state
+            .storage_map
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(&first), keys(&second));
+    let mut differing = 0;
+    for ((key, a), (_, b)) in first.storage_map.iter().zip(&second.storage_map) {
+        if a == b {
+            continue;
+        }
+        differing += 1;
+        assert!(
+            key.starts_with(b"MessageSecrets"),
+            "{}",
+            String::from_utf8_lossy(key)
+        );
+        let mut a: serde_json::Value = serde_json::from_slice(a).unwrap();
+        let mut b: serde_json::Value = serde_json::from_slice(b).unwrap();
+        without_stored_times(&mut a);
+        without_stored_times(&mut b);
+        assert_eq!(a, b);
+    }
+    assert_eq!(differing, 1, "the stored time is what differs");
+}
+
 #[test]
 fn an_abandoned_roster_proposal_does_not_ride_the_next_commit() {
     let m = mimi_pair("stale");
