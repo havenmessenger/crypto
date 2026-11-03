@@ -2,31 +2,31 @@ repos:
   - repo: local
     hooks:
       - id: manifest-purity
-        name: Manifest-purity (guard 1 — no non-crates.io deps)
+        name: Manifest-purity (guard 1 - no non-crates.io deps)
         entry: python3 scripts/check_manifest_purity.py
         language: system
         pass_filenames: false
 
       - id: one-way-dep
-        name: One-way dependency (guard 3 — no app/binding-crate references)
+        name: One-way dependency (guard 3 - no app/binding-crate references)
         entry: python3 scripts/check_one_way_dep.py
         language: system
         pass_filenames: false
 
       - id: tell-scan
-        name: Tell-scan (guard 4 — no internal tracker IDs / dev IPs / founder PII)
+        name: Tell-scan (guard 4 - no internal tracker IDs / dev IPs / founder PII)
         entry: python3 scripts/check_tell_scan.py
         language: system
         pass_filenames: true
 
       - id: public-comment-hygiene
-        name: Public-comment-hygiene (guard 5 — no provenance/process narration in comments)
+        name: Public-comment-hygiene (guard 5 - no provenance/process narration in comments)
         entry: python3 scripts/check_public_comment_hygiene.py
         language: system
         pass_filenames: true
 
       - id: commit-message-hygiene
-        name: Commit-message-hygiene (guard 6 — no internal review/process vocabulary in commit messages)
+        name: Commit-message-hygiene (guard 6 - no internal review/process vocabulary in commit messages)
         entry: python3 scripts/check_commit_message_hygiene.py
         language: system
         pass_filenames: false

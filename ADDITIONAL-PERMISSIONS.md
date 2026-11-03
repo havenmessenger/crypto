@@ -2,7 +2,7 @@
 
 This project is licensed under the GNU Affero General Public License, version 3 or later, whose
 complete text is in [LICENSE](LICENSE). Section 7 of that license allows a copyright holder to grant
-**additional permissions** — terms that supplement the license by making exceptions from one or more of
+**additional permissions**: terms that supplement the license by making exceptions from one or more of
 its conditions.
 
 The copyright holder grants the additional permission set out below. Nothing here removes or narrows any
@@ -10,7 +10,7 @@ freedom the AGPL grants you; an additional permission can only widen what you ar
 
 ## Application distribution platforms
 
-Some application distribution platforms impose terms on the software they distribute — code signing
+Some application distribution platforms impose terms on the software they distribute: code signing
 that prevents a user from installing a modified build, limits on the number of devices or accounts a
 copy may be used on, and prohibitions on further redistribution. Those terms conflict with the
 conditions in sections 6 and 10 of the AGPL, which require that Installation Information accompany a
@@ -35,8 +35,8 @@ interaction with users over a network.
 by that person under the AGPL, and this permission cannot reach it. If you are assembling a build for
 an application distribution platform, the source you assemble it from must therefore either be
 entirely under this permission or carry equivalent permission from every other copyright holder whose
-work it contains. Contributors are asked to extend the same permission to their own contributions —
-see [CONTRIBUTING.md](CONTRIBUTING.md) — so that this remains true as the project grows.
+work it contains. Contributors are asked to extend the same permission to their own contributions
+(see [CONTRIBUTING.md](CONTRIBUTING.md)), so that this remains true as the project grows.
 
 **It may be removed downstream.** Section 7 says that when you convey a copy of a covered work you may
 at your option remove any additional permission from that copy. A recipient who does so passes on the

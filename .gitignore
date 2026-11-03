@@ -20,7 +20,7 @@ debug
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Local-only tell-scan sensitive-literal sidecar (guard 4) — never commit the
+# Local-only tell-scan sensitive-literal sidecar (guard 4) - never commit the
 # populated file; see scripts/_tell_scan_denylist.py.example for the template.
 scripts/_tell_scan_denylist.py
 scripts/__pycache__/

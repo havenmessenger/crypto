@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      # Pinned to match rust-toolchain.toml's `channel` exactly — `@stable` would install
+      # Pinned to match rust-toolchain.toml's `channel` exactly - `@stable` would install
       # whatever "stable" resolves to at CI run time, silently drifting from the pin this repo
       # claims to build under (and, from a fresh clone, actually failing `cargo fmt --check`
       # once the two diverge). Bump both together on a deliberate toolchain update.
@@ -54,7 +54,7 @@ jobs:
     # rlib (no wasm-bindgen post-processing here - that only applies further downstream, to a
     # final cdylib entry point this repo does not build), so the .rlib itself is the artifact
     # to diff. Uses nightly-2026-03-28: the toolchain this crate's WASM
-    # build is actively verified against — see rust-toolchain.toml's comment for the full
+    # build is actively verified against - see rust-toolchain.toml's comment for the full
     # explanation. Verified locally byte-identical before this job was added.
     runs-on: ubuntu-latest
     steps:

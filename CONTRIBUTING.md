@@ -25,7 +25,7 @@ By contributing you agree your contributions are licensed under
 [AGPL-3.0-or-later](LICENSE).
 
 This project also carries an additional permission under section 7 of that license, which is what makes
-distribution through application distribution platforms possible at all — see
+distribution through application distribution platforms possible at all - see
 [ADDITIONAL-PERMISSIONS.md](ADDITIONAL-PERMISSIONS.md). A permission of that kind reaches only the
 copyright it was granted for, so **please extend the same permission to your own contribution.** Adding
 this trailer beside your `Signed-off-by` is enough:
@@ -34,7 +34,7 @@ this trailer beside your `Signed-off-by` is enough:
 Additional-Permission: AGPL-3.0-or-later section 7, application distribution platforms, per ADDITIONAL-PERMISSIONS.md
 ```
 
-You are not required to. A contribution without it is welcome and is licensed under the AGPL as normal —
+You are not required to. A contribution without it is welcome and is licensed under the AGPL as normal -
 but a build for an application distribution platform cannot then include it, so we may have to keep it
 out of that build rather than out of the project. Saying so plainly here is better than discovering it
 later.
