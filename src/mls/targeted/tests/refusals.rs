@@ -515,11 +515,11 @@ fn locked_version(name: &str) -> String {
 fn the_openmls_version_that_the_key_mirror_was_checked_against_has_not_changed() {
     assert_eq!(
         locked_version("openmls"),
-        "0.8.1",
+        "0.9.2",
         "re-check the stored key-pair layout in leaf_key.rs"
     );
-    assert_eq!(locked_version("openmls_memory_storage"), "0.5.0");
-    assert_eq!(locked_version("openmls_rust_crypto"), "0.5.1");
+    assert_eq!(locked_version("openmls_memory_storage"), "0.6.0");
+    assert_eq!(locked_version("openmls_rust_crypto"), "0.6.0");
 }
 
 #[test]

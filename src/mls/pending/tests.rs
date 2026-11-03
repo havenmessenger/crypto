@@ -557,8 +557,10 @@ fn every_plaintext_lane_generator_abandons_to_the_exact_predecessor() {
     }
 }
 
+/// openmls stores each retained epoch's message secrets with the time they were stored, so two
+/// confirmations of one pending commit are the same epoch, keys and members, not the same bytes.
 #[test]
-fn one_pending_commit_always_confirms_to_the_same_bytes() {
+fn one_pending_commit_always_confirms_to_the_same_state() {
     let m = mimi_pair("stable");
     let (carol_kp, _) = mimi_kp("carol-stable");
     let mut pending =
@@ -567,7 +569,13 @@ fn one_pending_commit_always_confirms_to_the_same_bytes() {
     let durable = pending.to_bytes().unwrap();
     let first = confirm(PendingCommit::from_bytes(&durable).unwrap(), &m.alice_state);
     let second = confirm(PendingCommit::from_bytes(&durable).unwrap(), &m.alice_state);
-    assert_eq!(first, second);
+    let pending = PendingCommit::from_bytes(&durable).unwrap();
+    assert!(pending.is_installed_in(&first).unwrap());
+    assert!(pending.is_installed_in(&second).unwrap());
+    assert_eq!(
+        list_members_with_indices(first).unwrap(),
+        list_members_with_indices(second).unwrap()
+    );
 }
 
 #[test]
