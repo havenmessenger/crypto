@@ -74,7 +74,7 @@ pub fn build_identity_from_keypair(
     pub_bytes: Vec<u8>,
     // When true, the leaf node advertises the mimiParticipantList AppSync custom proposal type
     // (demo / MIMI path only - see `mimi_generate_identity`). When false the KeyPackage is built
-    // EXACTLY as the production path always has (no `.leaf_node_capabilities()` call) - byte-identical,
+    // EXACTLY as the production path always has - byte-identical,
     // so production identities are unaffected (INV-MLS-002 + trinity untouched).
     appsync_caps: bool,
 ) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
@@ -106,7 +106,7 @@ pub fn build_identity_from_keypair(
     let kp_builder = KeyPackage::builder()
         .key_package_extensions(Extensions::empty())
         .key_package_lifetime(lifetime);
-    // The `false` branch is the UNCHANGED production path (no leaf capabilities call). The `true`
+    // The `false` branch is the production path, advertising what it always has. The `true`
     // branch (MIMI demo) advertises the mimiParticipantList custom proposal so AppSync commits validate.
     let key_package_bundle = if appsync_caps {
         kp_builder
@@ -120,12 +120,14 @@ pub fn build_identity_from_keypair(
                 credential_with_key,
             )?
     } else {
-        kp_builder.build(
-            crate::suite_policy::mls_generation_suite(),
-            &provider,
-            &signer,
-            credential_with_key,
-        )?
+        kp_builder
+            .leaf_node_capabilities(crate::mls::capabilities::plain_leaf_capabilities())
+            .build(
+                crate::suite_policy::mls_generation_suite(),
+                &provider,
+                &signer,
+                credential_with_key,
+            )?
     };
 
     let key_package = key_package_bundle.key_package();

@@ -143,7 +143,9 @@ fn epoch_secrets(
     let psk = Zeroizing::new(
         group
             .export_secret(crypto, EXPORTER_LABEL, EXPORTER_CONTEXT_PSK, suite.kdf_nh)
-            .ok()?,
+            .ok()?
+            .as_slice()
+            .to_vec(),
     );
     let sender_auth_data = Zeroizing::new(
         group
@@ -153,7 +155,9 @@ fn epoch_secrets(
                 EXPORTER_CONTEXT_SENDER_AUTH,
                 suite.kdf_nh,
             )
-            .ok()?,
+            .ok()?
+            .as_slice()
+            .to_vec(),
     );
     Some(EpochSecrets {
         psk,

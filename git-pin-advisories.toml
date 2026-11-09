@@ -1,0 +1,18 @@
+# Advisories read for crates pinned to a git revision. scripts/check_git_pin_advisories.py fails on
+# any advisory for such a crate that has no entry here, by its RUSTSEC id or an alias.
+# id: the advisory. fixed_in: the upstream revision holding the fix, an ancestor of the pin. why: what was read.
+
+[[advisory]]
+id = "GHSA-gc79-23g3-8g52"
+fixed_in = "1f97f9db40331296b96048fef38d337e05247e14"
+why = "Unbounded recursion decoding nested extensions. The fix is an ancestor of the pinned OpenMLS revision."
+
+[[advisory]]
+id = "GHSA-p276-g3f3-wwgh"
+fixed_in = "60c7dbb0c80e2eedc1786b4c41671db45434b6f9"
+why = "process_message marks a used ratchet generation and persists it. The fix is an ancestor of the pinned OpenMLS revision."
+
+[[advisory]]
+id = "GHSA-94v4-rg25-x625"
+fixed_in = "977ddb7a1a725b2a02af733bd8564f1779bef26d"
+why = "An external commit that truncated the tree no longer brings the removed leaf back. The fix is an ancestor of the pinned OpenMLS revision."

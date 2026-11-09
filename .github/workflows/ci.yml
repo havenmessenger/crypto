@@ -47,6 +47,9 @@ jobs:
         # `cargo audit` auto-reads .cargo/audit.toml if present, so documented advisory
         # dispositions (e.g. the RSA Marvin / libcrux-phantom notes) apply.
         run: cargo install cargo-audit --locked && cargo audit
+      - name: git-pin advisories
+        # cargo audit does not match advisories against a crate pinned to a git revision.
+        run: python3 scripts/check_git_pin_advisories.py --selftest && python3 scripts/check_git_pin_advisories.py --db ~/.cargo/advisory-db
 
   reproducible-build:
     # Stage 1 of docs/REPRODUCIBLE_BUILDS.md: proves the WASM-target build of this crate is

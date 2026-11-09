@@ -500,26 +500,31 @@ fn the_key_pair_mirror_can_be_read_and_can_never_be_written() {
     );
 }
 
-fn locked_version(name: &str) -> String {
+/// The version and source lines of a package in the lockfile.
+fn locked(name: &str) -> (String, String) {
     let lock = include_str!("../../../../Cargo.lock");
     let marker = format!("name = \"{name}\"\nversion = \"");
     let start = lock.find(&marker).expect("package in the lockfile") + marker.len();
-    lock[start..]
-        .split('"')
-        .next()
-        .expect("version")
-        .to_string()
+    let mut rest = lock[start..].split('"');
+    let version = rest.next().expect("version").to_string();
+    assert_eq!(rest.next(), Some("\nsource = "), "{name} has a source line");
+    (version, rest.next().expect("source").to_string())
 }
 
 #[test]
-fn the_openmls_version_that_the_key_mirror_was_checked_against_has_not_changed() {
-    assert_eq!(
-        locked_version("openmls"),
-        "0.9.2",
-        "re-check the stored key-pair layout in leaf_key.rs"
-    );
-    assert_eq!(locked_version("openmls_memory_storage"), "0.6.0");
-    assert_eq!(locked_version("openmls_rust_crypto"), "0.6.0");
+fn the_openmls_revision_that_the_key_mirror_was_checked_against_has_not_changed() {
+    let source = "git+https://github.com/openmls/openmls?rev=28369d5b48608bef4ddf8371d91503b0f3852bb3#28369d5b48608bef4ddf8371d91503b0f3852bb3";
+    for (name, version) in [
+        ("openmls", "0.9.0"),
+        ("openmls_memory_storage", "0.6.0"),
+        ("openmls_rust_crypto", "0.6.0"),
+    ] {
+        assert_eq!(
+            locked(name),
+            (version.to_string(), source.to_string()),
+            "re-check the stored key-pair layout in leaf_key.rs"
+        );
+    }
 }
 
 #[test]

@@ -63,7 +63,7 @@ cd crypto
 cargo build
 cargo test --release
 ```
-No submodules, no external services, no network access beyond crates.io during the initial
+No submodules, no external services, no network access beyond crates.io and OpenMLS's repository during the initial
 dependency fetch. A clean build + full test run (known-answer vectors against published RFC/NIST
 test data, plus fail-closed and zeroize proofs) takes about two minutes on a typical machine.
 Known-answer tests are the gate for any change - see `CONTRIBUTING.md`.

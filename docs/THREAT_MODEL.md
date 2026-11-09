@@ -117,7 +117,8 @@ reader has no remaining callers.
 **Capability assumed:** a compromised or vulnerable upstream dependency.
 **Mitigation:** no hand-rolled cryptography anywhere in this crate - every primitive composes
 vetted, independently-maintained crates (RustCrypto's AES/HKDF/PBKDF2/HMAC family, `dalek`
-Ed25519, `rPGP`, `openmls`), all sourced from crates.io with no vendored or forked copies.
+Ed25519, `rPGP`, `openmls`), sourced from crates.io, or for `openmls` from its own repository at
+one exact revision, with no vendored or forked copies.
 Every cryptographic operation is gated by known-answer tests against published RFC/NIST test
 vectors, so a dependency regression that silently changed output would fail the test suite, not
 ship silently. `cargo audit` runs in CI against the full dependency tree; every currently-ignored

@@ -1567,6 +1567,38 @@ fn welcome_into_a_group_with_a_lapsed_leaf() -> (Vec<u8>, Vec<u8>) {
     (welcome, carol)
 }
 
+/// Bob's group state, and a Commit by Alice adding Carol on a KeyPackage that has since lapsed.
+fn commit_adding_a_key_package_that_has_lapsed() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let now = now_secs();
+    let (_, _, alice) = mimi_generate_identity("alice@as.test".into(), now).unwrap();
+    let (_, bob_kp, bob) = mimi_generate_identity("bob@as.test".into(), now).unwrap();
+    let (_, carol_kp, _) =
+        mimi_generate_identity("carol@as.test".into(), now - KEY_PACKAGE_LIFETIME + 2).unwrap();
+    let group = mimi_create_group("lapsed-add".into(), alice.clone()).unwrap();
+    let (group, welcome, _) =
+        mimi_add_member_commit_appsync(group, alice.clone(), bob_kp, vec![1]).unwrap();
+    let prepared =
+        prepare_welcome_retirement(welcome, bob.clone(), Vec::new(), String::new()).unwrap();
+    let (bob_state, bob_bundle) = complete_welcome(prepared).unwrap();
+    let (_, _, commit) = mimi_add_member_commit_appsync(group, alice, carol_kp, vec![2]).unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    (bob_state, bob_bundle, commit)
+}
+
+/// A member that reads an Add after its KeyPackage lapsed is refused by default, and reads it under `Skip`.
+///
+/// Revert check: pass `Verify` from `mls_process_commit_appsync_with` and the `Skip` read is refused; make the default
+/// `Skip` and the refusal goes.
+#[test]
+fn a_commit_adding_a_lapsed_key_package_is_refused_unless_lifetimes_are_skipped() {
+    let (state, bundle, commit) = commit_adding_a_key_package_that_has_lapsed();
+    let refused = mls_process_commit_appsync(state.clone(), bundle.clone(), commit.clone())
+        .expect_err("the default still checks lifetimes");
+    assert!(format!("{refused:?}").contains("Lifetime"), "{refused:?}");
+    mls_process_commit_appsync_with(state, bundle, commit, crate::mls::JoinLifetimes::Skip)
+        .expect("a member that skips lifetimes reads it");
+}
+
 /// By default a join refuses a tree holding a lapsed KeyPackage-sourced leaf.
 #[test]
 fn a_join_with_lapsed_leaf_is_refused_unless_lifetimes_are_skipped() {

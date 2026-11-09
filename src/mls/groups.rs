@@ -148,7 +148,7 @@ pub(crate) fn regenerate_key_package_with_capabilities(
         .key_package_lifetime(lifetime);
     let builder = match required_capabilities.or(capabilities) {
         Some(capabilities) => builder.leaf_node_capabilities(capabilities),
-        None => builder,
+        None => builder.leaf_node_capabilities(crate::mls::capabilities::plain_leaf_capabilities()),
     };
     let new_key_package_bundle = builder.build(
         crate::suite_policy::mls_generation_suite(),
@@ -206,6 +206,7 @@ pub fn create_group(group_id: String, bundle_bytes: Vec<u8>) -> anyhow::Result<V
     let group_config = MlsGroupCreateConfig::builder()
         .ciphersuite(crate::suite_policy::mls_generation_suite())
         .wire_format_policy(WireFormatPolicy::default())
+        .capabilities(crate::mls::capabilities::plain_leaf_capabilities())
         .build();
 
     let signer = MlsSigner {

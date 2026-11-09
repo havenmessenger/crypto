@@ -56,7 +56,11 @@ fn classifier_group(
             .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
             .capabilities(
                 Capabilities::builder()
+                    .ciphersuites(vec![
+                        Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+                    ])
                     .proposals(vec![ProposalType::SelfRemove])
+                    .credentials(vec![CredentialType::Basic])
                     .build(),
             )
             .build()
@@ -1142,7 +1146,7 @@ fn last_resort_identity(user_id: &str, now: i64) -> (Vec<u8>, Vec<u8>) {
             Some(&[crate::suite_policy::mls_generation_suite()]),
             Some(&[ExtensionType::LastResort]),
             None,
-            None,
+            Some(&[CredentialType::Basic]),
         ))
         .mark_as_last_resort()
         .build(

@@ -1,3 +1,5 @@
 # A crate named libcrux-secrets in the dependency lists of these lockfiles, not a secret.
 tools/openmls-cross-version/current/Cargo.lock:generic-api-key:1500
 tools/openmls-cross-version/previous/Cargo.lock:generic-api-key:1376
+Cargo.lock:generic-api-key:1945
+Cargo.lock:generic-api-key:1961

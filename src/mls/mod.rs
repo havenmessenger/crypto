@@ -5,6 +5,7 @@
 //! directly - they are serde-serialized opaque value types, not app-binding types, so exposing
 //! them here does not require this crate to depend on any binding layer.
 
+pub(crate) mod capabilities;
 pub mod entry_codec;
 pub mod groups;
 pub mod inspection;
@@ -26,6 +27,16 @@ pub enum JoinLifetimes {
     #[default]
     Verify,
     Skip,
+}
+
+impl JoinLifetimes {
+    /// The same choice, for a Commit's Adds: a member that reads an Add after its `KeyPackage` lapsed reads it under `Skip`.
+    pub(crate) const fn leaf_policy(self) -> openmls::group::LeafNodeLifetimePolicy {
+        match self {
+            Self::Verify => openmls::group::LeafNodeLifetimePolicy::Verify,
+            Self::Skip => openmls::group::LeafNodeLifetimePolicy::Skip,
+        }
+    }
 }
 
 /// Stage a join from `welcome` under `lifetimes`.

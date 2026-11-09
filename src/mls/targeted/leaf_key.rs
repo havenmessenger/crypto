@@ -11,9 +11,9 @@
 //!   one HPKE open, and none returns it to a caller of the crate;
 //! * a stored layout this mirror does not understand yields `None`, never a guess.
 //!
-//! The mirror follows the layout of the in-memory storage provider used with openmls 0.9.2; a test
-//! pins the openmls version and round-trips a real key, so an upgrade or a layout change fails
-//! loudly instead of silently.
+//! The mirror follows the layout of the in-memory storage provider at the openmls revision this
+//! crate pins; a test pins that revision and round-trips a real key, so an upgrade or a layout
+//! change fails loudly instead of silently.
 
 use openmls::prelude::{GroupEpoch, GroupId, MlsGroup};
 use openmls::treesync::EncryptionKey;

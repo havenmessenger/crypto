@@ -66,7 +66,7 @@ pub fn mimi_appsync_capabilities() -> Capabilities {
         Some(&[crate::suite_policy::mls_generation_suite()]), // 0x0001 only (via seam)
         None,                                                 // default extensions
         Some(&[ProposalType::Custom(MIMI_PARTICIPANT_LIST_PROPOSAL_TYPE)]), // + AppSync custom proposal
-        None,                                                               // default credentials
+        Some(&[CredentialType::Basic]),
     )
 }
 
@@ -788,6 +788,22 @@ pub fn mls_process_commit_appsync(
     bundle_bytes: Vec<u8>,
     commit_bytes: Vec<u8>,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, crate::mls::AuthenticatedSender)> {
+    mls_process_commit_appsync_with(
+        group_state_bytes,
+        bundle_bytes,
+        commit_bytes,
+        crate::mls::JoinLifetimes::Verify,
+    )
+}
+
+/// [`mls_process_commit_appsync`], reading the Adds in the Commit under `lifetimes`. A member that may read an Add after
+/// its KeyPackage lapsed takes `Skip`. Only the reading side: a sender still can't Add a lapsed KeyPackage.
+pub fn mls_process_commit_appsync_with(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    commit_bytes: Vec<u8>,
+    lifetimes: crate::mls::JoinLifetimes,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>, crate::mls::AuthenticatedSender)> {
     // Wrap on entry (see crate::mls::groups::mls_process_commit's comment on the
     // unused-but-still-owned bundle_bytes pattern).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
@@ -810,7 +826,7 @@ pub fn mls_process_commit_appsync(
         .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
     crate::mls::own_message::refuse_own_sender(&group, &message)?;
     let processed = group
-        .process_message(&provider, message)
+        .process_message_with_lifetime_policy(&provider, message, lifetimes.leaf_policy())
         .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
     crate::mls::own_message::refuse_own_content(&processed)?;
     // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
