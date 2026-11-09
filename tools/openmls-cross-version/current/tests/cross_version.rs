@@ -1,6 +1,6 @@
 //! crypto-core across an openmls release change.
 //!
-//! `Release::Previous` is crypto-core on openmls 0.8.1, run as the `../previous` driver; `Release::Current`
+//! `Release::Previous` is crypto-core on openmls 0.9.2, run as the `../previous` driver; `Release::Current`
 //! is this checkout, called in process. Both answer the same operations with the same JSON, so each test
 //! says which release performs each step and hands bytes between them exactly as a device would: state
 //! from storage, messages from the wire.
@@ -513,28 +513,10 @@ fn members_on_both_releases_share_one_mimi_group() {
     }
 }
 
-/// A state's join configuration under the name the previous release stored it with.
-fn with_previous_join_config_name(state: &[u8]) -> Vec<u8> {
-    let mut value: Value = serde_json::from_slice(state).expect("a group state");
-    for entry in value["storage_map"].as_array_mut().expect("entries") {
-        let key: Vec<u8> = serde_json::from_value(entry[0].clone()).expect("key");
-        if key.starts_with(b"MlsGroupJoinConfig") {
-            let stored: Vec<u8> = serde_json::from_value(entry[1].clone()).expect("value");
-            let renamed = String::from_utf8(stored)
-                .expect("JSON")
-                .replace("\"past_epoch_deletion_policy\"", "\"max_past_epochs\"");
-            entry[1] = serde_json::to_value(renamed.into_bytes()).expect("value");
-        }
-    }
-    serde_json::to_vec(&value).expect("a group state")
-}
-
-/// The previous release cannot load a group state this one wrote: this release stores the join
-/// configuration's retention setting as `past_epoch_deletion_policy`, which the previous release does
-/// not read. With that one field under its old name, the previous release loads the state and goes on
-/// reading and sending, on both lanes and after commits.
+/// The previous release loads a group state this one wrote and goes on reading and sending, on both lanes and after
+/// commits, so a device can move back.
 #[test]
-fn state_this_release_wrote_loads_under_the_previous_one_only_with_the_old_field_name() {
+fn state_this_release_wrote_continues_under_the_previous_one() {
     for mimi in [false, true] {
         let (_, mut alice) = identity(Current, "alice", mimi);
         let (bob_key_package, mut bob) = identity(Current, "bob", mimi);
@@ -549,20 +531,6 @@ fn state_this_release_wrote_loads_under_the_previous_one_only_with_the_old_field
         assert_eq!(read(Current, &mut bob, &first), "first");
         let in_flight = send(Current, &mut alice, "in flight");
 
-        let refused = call(
-            Previous,
-            json!({ "op": "members", "state": hex::encode(&bob.state) }),
-        );
-        assert!(
-            refused
-                .as_ref()
-                .is_err_and(|error| error.contains("SerializationError")),
-            "{refused:?}"
-        );
-
-        bob.state = with_previous_join_config_name(&bob.state);
-        alice.state = with_previous_join_config_name(&alice.state);
-        carol.state = with_previous_join_config_name(&carol.state);
         assert_eq!(read(Previous, &mut bob, &in_flight), "in flight");
         let reply = send(Previous, &mut bob, "back on the previous release");
         assert_eq!(
@@ -573,6 +541,18 @@ fn state_this_release_wrote_loads_under_the_previous_one_only_with_the_old_field
             read(Previous, &mut carol, &reply),
             "back on the previous release"
         );
+    }
+}
+
+/// A hub on this release reads the KeyPackage a member on the previous release built, as it does for an Add being sent.
+#[test]
+fn a_hub_on_this_release_reads_a_key_package_the_previous_release_built() {
+    for mimi in [false, true] {
+        let (key_package, _) = identity(Previous, "alice", mimi);
+        mimi_core::gate::mimi_gate_keypackage(&key_package).expect("the gate takes it");
+        assert!(!mimi_core::gate::keypackage_ref(&key_package)
+            .expect("its reference")
+            .is_empty());
     }
 }
 

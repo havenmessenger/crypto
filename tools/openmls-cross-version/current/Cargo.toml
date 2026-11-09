@@ -16,6 +16,8 @@ license = "AGPL-3.0-or-later"
 
 [dev-dependencies]
 crypto-core = { path = "../../.." }
+# What a hub reads a member's KeyPackage with, on the same openmls revision as this checkout.
+mimi-core = { git = "https://github.com/havenmessenger/interop", rev = "d39bfeb9d9e39b16c158de81d1aee5690020c9a5" }
 serde_json = "1"
 hex = "0.4"
 anyhow = "1"

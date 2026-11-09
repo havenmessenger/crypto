@@ -52,8 +52,8 @@ thiserror = "2"
 spake2 = "0.4.0"
 subtle = "2"
 # HPKE PSK mode (RFC 9180 section 5.1.2) is not reachable through openmls's crypto trait, which exposes
-# Base mode only. These are the exact HPKE crates openmls_rust_crypto already builds on, pinned to the
-# locked versions so targeted messages use the same vetted implementation.
+# Base mode only. Pinned exactly, at the release whose test feature lets a sealed message be compared
+# byte for byte with a stored vector; 0.8, which openmls_rust_crypto now builds on, dropped that feature.
 hpke-rs = { version = "=0.7.0", default-features = false, features = ["hazmat", "serialization"] }
 hpke-rs-crypto = "=0.7.0"
 hpke-rs-rust-crypto = "=0.7.0"
