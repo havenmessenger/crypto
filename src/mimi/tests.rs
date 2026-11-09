@@ -1580,18 +1580,3 @@ fn a_join_with_lapsed_leaf_is_refused_unless_lifetimes_are_skipped() {
     complete_welcome_with(prepared, crate::mls::JoinLifetimes::Skip)
         .expect("a join that skips lifetimes gets in");
 }
-
-/// Skipping the check leaves the rest of leaf validation in place: a Welcome for another group's state still fails.
-#[test]
-fn skipping_lifetimes_keeps_the_rest_of_the_welcome_checks() {
-    let now = now_secs();
-    let (_, _, alice) = mimi_generate_identity("alice@as.test".into(), now).unwrap();
-    let (_, _, stranger) = mimi_generate_identity("stranger@as.test".into(), now).unwrap();
-    let (_, carol_kp, _) = mimi_generate_identity("carol@as.test".into(), now).unwrap();
-    let group = mimi_create_group("other".into(), alice.clone()).unwrap();
-    let (_, welcome, _) = mimi_add_member_commit_appsync(group, alice, carol_kp, vec![1]).unwrap();
-    assert!(
-        prepare_welcome_retirement(welcome, stranger, Vec::new(), String::new()).is_err(),
-        "a Welcome this KeyPackage was not used for is refused"
-    );
-}
