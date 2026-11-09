@@ -15,6 +15,41 @@ pub mod store;
 pub mod stored;
 pub mod targeted;
 
+/// Whether a join validates the lifetimes of the key-package-sourced leaves in the tree a Welcome carries.
+///
+/// A leaf keeps its key package's lifetime until its member commits a path, so a member that never commits ages past
+/// it and every later join to that group fails. RFC 9420 section 7.3 requires the check when a key package is added and
+/// only recommends it when a tree is received. `Verify` is the default; an application whose members may stay
+/// quiet for longer than a key package's lifetime takes `Skip`. Every other check on a leaf applies either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum JoinLifetimes {
+    #[default]
+    Verify,
+    Skip,
+}
+
+/// Stage a join from `welcome` under `lifetimes`.
+pub(crate) fn staged_welcome<Provider: openmls::storage::OpenMlsProvider>(
+    provider: &Provider,
+    config: &MlsGroupJoinConfig,
+    welcome: Welcome,
+    ratchet_tree: Option<RatchetTreeIn>,
+    lifetimes: JoinLifetimes,
+) -> Result<StagedWelcome, WelcomeError<Provider::StorageError>> {
+    match lifetimes {
+        JoinLifetimes::Verify => {
+            StagedWelcome::new_from_welcome(provider, config, welcome, ratchet_tree)
+        }
+        JoinLifetimes::Skip => {
+            let mut builder = StagedWelcome::build_from_welcome(provider, config, welcome)?;
+            if let Some(ratchet_tree) = ratchet_tree {
+                builder = builder.with_ratchet_tree(ratchet_tree);
+            }
+            builder.skip_lifetime_validation().build()
+        }
+    }
+}
+
 pub use own_message::OwnMessage;
 pub use processing_error::ProcessingError;
 

@@ -857,8 +857,21 @@ pub(crate) fn conservative_retirement(
 /// deleted and therefore survives in the returned bundle, by design. The caller MUST persist the
 /// returned bundle in place of the input bundle.
 pub fn process_welcome(
+    welcome_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    process_welcome_with(
+        welcome_bytes,
+        bundle_bytes,
+        crate::mls::JoinLifetimes::Verify,
+    )
+}
+
+/// [`process_welcome`], with the join's treatment of leaf lifetimes chosen by the caller.
+pub fn process_welcome_with(
     welcome_bytes: Vec<u8>, // This is actually combined (welcome_bytes, ratchet_tree_bytes)
     bundle_bytes: Vec<u8>,
+    lifetimes: crate::mls::JoinLifetimes,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     // Wrap the owned bundle input on entry (see regenerate_key_package's
     // comment). welcome_bytes is an MLS Welcome (HPKE-sealed wire form), not the plaintext
@@ -956,11 +969,12 @@ pub fn process_welcome(
         .build();
 
     // Create staged join from Welcome with ratchet tree
-    let staged_join = StagedWelcome::new_from_welcome(
+    let staged_join = crate::mls::staged_welcome(
         &provider,
         &mls_group_config,
         welcome,
         Some(ratchet_tree.into()),
+        lifetimes,
     )
     .map_err(|e| anyhow::anyhow!("Error processing Welcome: {:?}", e))?;
 

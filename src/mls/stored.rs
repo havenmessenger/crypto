@@ -237,7 +237,18 @@ pub fn process_welcome(
     welcome: &[u8],
     bundle: &[u8],
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-    let (state, bundle) = groups::process_welcome(welcome.to_vec(), bundle.to_vec())?;
+    process_welcome_with(store, welcome, bundle, crate::mls::JoinLifetimes::Verify)
+}
+
+/// [`process_welcome`], with the join's treatment of leaf lifetimes chosen by the caller.
+pub fn process_welcome_with(
+    store: &dyn MlsStore,
+    welcome: &[u8],
+    bundle: &[u8],
+    lifetimes: crate::mls::JoinLifetimes,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let (state, bundle) =
+        groups::process_welcome_with(welcome.to_vec(), bundle.to_vec(), lifetimes)?;
     let group = commit(store, &BTreeMap::new(), state)?;
     Ok((group, bundle))
 }
@@ -599,7 +610,16 @@ pub fn complete_welcome(
     store: &dyn MlsStore,
     prepared: PreparedWelcome,
 ) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
-    let (state, bundle) = mimi::complete_welcome(prepared)?;
+    complete_welcome_with(store, prepared, crate::mls::JoinLifetimes::Verify)
+}
+
+/// [`complete_welcome`], with the join's treatment of leaf lifetimes chosen by the caller.
+pub fn complete_welcome_with(
+    store: &dyn MlsStore,
+    prepared: PreparedWelcome,
+    lifetimes: crate::mls::JoinLifetimes,
+) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
+    let (state, bundle) = mimi::complete_welcome_with(prepared, lifetimes)?;
     match commit(store, &BTreeMap::new(), state) {
         Ok(group) => Ok((group, bundle)),
         Err(error) => Err(MimiWelcomeError::Spent {

@@ -1193,9 +1193,15 @@ pub fn prepare_welcome_retirement(
 /// complete - a hub-pin rejection or any post-open error - is a [`MimiWelcomeError::Spent`] carrying
 /// the best retirement obtainable (precise when it can be built, else the conservative the caller
 /// already holds); there is no `Unspent` outcome in phase 2.
+pub fn complete_welcome(prepared: PreparedWelcome) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
+    complete_welcome_with(prepared, crate::mls::JoinLifetimes::Verify)
+}
+
+/// [`complete_welcome`], with the join's treatment of leaf lifetimes chosen by the caller.
 #[allow(clippy::too_many_lines)]
-pub fn complete_welcome(
+pub fn complete_welcome_with(
     mut prepared: PreparedWelcome,
+    lifetimes: crate::mls::JoinLifetimes,
 ) -> Result<(Vec<u8>, Vec<u8>), MimiWelcomeError> {
     // Move the ephemeral material out of the Drop type via `.take()`/`mem::take` (Rust forbids moving
     // fields out of a Drop type). The husk left behind holds only empty/None, so its Drop wipes nothing.
@@ -1265,11 +1271,12 @@ pub fn complete_welcome(
     // this independent of the optional Welcome ratchet-tree extension.
     let join: anyhow::Result<MlsGroup> =
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let staged = StagedWelcome::new_from_welcome(
+            let staged = crate::mls::staged_welcome(
                 &provider,
                 &mls_group_config,
                 welcome,
                 ratchet_tree,
+                lifetimes,
             )
             .map_err(|e| anyhow::anyhow!("Error processing Welcome: {:?}", e))?;
             staged
