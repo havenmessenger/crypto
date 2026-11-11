@@ -16,7 +16,7 @@ use crate::mimi::{
     mimi_remove_member_commit_appsync_pending,
     mimi_remove_member_commit_appsync_pending_with_authenticated_data,
     mimi_remove_member_commit_by_leaf_index_pending, mimi_remove_member_commit_pending,
-    mls_process_commit_appsync,
+    mimi_replace_member_commit_appsync_pending_with_authenticated_data, mls_process_commit_appsync,
 };
 use crate::mls::groups::{
     add_member, add_member_pending, add_members_bulk_pending, create_group, decrypt_message,
@@ -107,6 +107,7 @@ fn every_generator_stages_and_leaves_the_canonical_state_untouched() {
     let m = mimi_pair("all");
     let (carol_kp, _) = mimi_kp("carol-all");
     let (dave_kp, _) = mimi_kp("dave-all");
+    let (eve_kp, _) = mimi_kp("eve-all");
     let bob_leaf = list_members_with_indices(m.alice_state.clone())
         .unwrap()
         .into_iter()
@@ -219,6 +220,19 @@ fn every_generator_stages_and_leaves_the_canonical_state_untouched() {
             .unwrap(),
             s,
         ),
+        (
+            "mimi_replace_member_commit_appsync",
+            mimi_replace_member_commit_appsync_pending_with_authenticated_data(
+                s.clone(),
+                a.clone(),
+                "bob-all@as.test".into(),
+                eve_kp,
+                vec![4],
+                b"replaced".to_vec(),
+            )
+            .unwrap(),
+            s,
+        ),
     ];
     for (name, pending, canonical) in &pendings {
         assert_eq!(format_of(pending), STAGED_FORMAT, "{name} writes staged/1");
@@ -229,8 +243,8 @@ fn every_generator_stages_and_leaves_the_canonical_state_untouched() {
         assert!(!pending.is_installed_in(canonical).unwrap(), "{name}");
         assert_eq!(pending.summary().to_epoch, pending.predecessor_epoch() + 1);
     }
-    // The twelfth generator, external Remove acceptance, has its own round trip below.
-    assert_eq!(pendings.len(), 11);
+    // The thirteenth generator, external Remove acceptance, has its own round trip below.
+    assert_eq!(pendings.len(), 12);
     for (_, pending, canonical) in pendings {
         let _ = confirm(pending, canonical);
     }
@@ -278,6 +292,89 @@ fn a_confirmed_appsync_add_reaches_the_existing_member_and_the_new_one() {
         b"carol-confirm@as.test"
     );
     assert!(summary.removed.is_empty());
+}
+
+/// One member replaced by another in one commit: the commit carries its statement in the clear, a third member
+/// applies it, the replacing member joins from the Welcome, and from the next epoch the replaced member reads nothing.
+#[test]
+fn a_member_replaced_in_one_commit_leaves_the_group_as_the_other_joins() {
+    let m = mimi_pair("replace");
+    let (dave_kp, dave) = mimi_kp("dave-replace");
+    let pending = mimi_add_members_bulk_commit_appsync_pending(
+        m.alice_state.clone(),
+        m.alice.clone(),
+        vec![dave_kp],
+        vec![0x81, 0x01],
+    )
+    .unwrap();
+    let (commit, welcome) = (
+        pending.commit().to_vec(),
+        pending.welcome().unwrap().to_vec(),
+    );
+    let alice_state = confirm(pending, &m.alice_state);
+    let (bob_state, _, _) = mls_process_commit_appsync(m.bob_state, m.bob.clone(), commit).unwrap();
+    let prepared =
+        crate::mimi::prepare_welcome_retirement(welcome, dave.clone(), Vec::new(), String::new())
+            .unwrap();
+    let (dave_state, _) = crate::mimi::complete_welcome(prepared).unwrap();
+
+    let (carol_kp, carol) = mimi_kp("carol-replace");
+    let statement = b"carol replaces bob, by alice".to_vec();
+    let pending = mimi_replace_member_commit_appsync_pending_with_authenticated_data(
+        alice_state.clone(),
+        m.alice.clone(),
+        "bob-replace@as.test".into(),
+        carol_kp,
+        vec![0x81, 0x02],
+        statement.clone(),
+    )
+    .unwrap();
+    let pending = PendingCommit::from_bytes(&pending.to_bytes().unwrap()).unwrap();
+    let commit = pending.commit().to_vec();
+    let welcome = pending.welcome().unwrap().to_vec();
+    let summary = pending.summary().clone();
+    assert_eq!(framed_authenticated_data(&commit).1, statement);
+    assert_eq!(summary.added.len(), 1);
+    assert_eq!(
+        summary.added[0].credential_identity,
+        b"carol-replace@as.test"
+    );
+    assert_eq!(summary.removed.len(), 1);
+    assert_eq!(
+        summary.removed[0].credential_identity,
+        b"bob-replace@as.test"
+    );
+
+    let alice_state = confirm(pending, &alice_state);
+    let (dave_state, roster, _) =
+        mls_process_commit_appsync(dave_state, dave.clone(), commit.clone()).unwrap();
+    assert_eq!(
+        roster,
+        vec![0x81, 0x02],
+        "the member applies the one commit"
+    );
+    let prepared =
+        crate::mimi::prepare_welcome_retirement(welcome, carol.clone(), Vec::new(), String::new())
+            .unwrap();
+    let (carol_state, _) = crate::mimi::complete_welcome(prepared).unwrap();
+    // Whether the replaced member applies its own removal or refuses it, the state it is left with reads nothing
+    // sent after the commit.
+    let bob_after = mls_process_commit_appsync(bob_state.clone(), m.bob.clone(), commit)
+        .map_or(bob_state, |(state, _, _)| state);
+
+    let (_, ct) = encrypt_message(alice_state.clone(), m.alice, b"after".to_vec()).unwrap();
+    let (_, pt, _) = decrypt_message(dave_state, dave, ct.clone()).unwrap();
+    assert_eq!(pt, b"after");
+    let (_, pt, _) = decrypt_message(carol_state, carol, ct.clone()).unwrap();
+    assert_eq!(pt, b"after");
+    assert!(
+        decrypt_message(bob_after, m.bob, ct).is_err(),
+        "the replaced member reads nothing after the commit"
+    );
+    assert_eq!(
+        summary.members_after,
+        list_members_with_indices(alice_state).unwrap()
+    );
 }
 
 #[test]

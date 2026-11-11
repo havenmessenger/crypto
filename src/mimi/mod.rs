@@ -43,7 +43,7 @@ use std::mem;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::mls::pending::{open_group, staged, PendingCommit, WelcomeForm};
+use crate::mls::pending::{open_group, staged, OpenedGroup, PendingCommit, WelcomeForm};
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
 
 /// The mimiParticipantList `AppSync` custom MLS proposal type (protocol-06 §5.3). MUST stay in lockstep
@@ -644,18 +644,10 @@ pub fn mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
     );
     let mut opened = open_group(group_state_bytes, bundle_bytes)?;
 
-    let mut validated_kps = Vec::with_capacity(key_packages_bytes.len());
-    for key_package_bytes in &key_packages_bytes {
-        crate::mls::check_wire_size(key_package_bytes, "mimi KeyPackage")?;
-        let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes.as_slice())
-            .map_err(|e| anyhow::anyhow!("Invalid KeyPackage: {:?}", e))?;
-        let validated_kp = key_package
-            .validate(opened.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|e| anyhow::anyhow!("KeyPackage validation failed: {:?}", e))?;
-        // INV-MLS-002: validate every foreign KeyPackage before building the commit.
-        crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
-        validated_kps.push(validated_kp);
-    }
+    let validated_kps = key_packages_bytes
+        .iter()
+        .map(|key_package_bytes| validated_key_package(&opened, key_package_bytes))
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     // Stage the roster custom proposal (by value, into the pending store), then build ONE commit that
     // ALSO inlines the Add by value (commit builder `propose_adds`) - both BY VALUE so the receiver can
@@ -743,16 +735,7 @@ pub fn mimi_remove_member_commit_appsync_pending_with_authenticated_data(
 ) -> anyhow::Result<PendingCommit> {
     let mut opened = open_group(group_state_bytes, bundle_bytes)?;
 
-    let target_index = opened
-        .group
-        .members()
-        .find(|m| {
-            BasicCredential::try_from(m.credential.clone())
-                .map(|b| b.identity() == credential_identity.as_bytes())
-                .unwrap_or(false)
-        })
-        .map(|m| m.index)
-        .ok_or_else(|| anyhow::anyhow!("Member '{}' not found", credential_identity))?;
+    let target_index = member_index(&opened, &credential_identity)?;
 
     // Stage the roster custom proposal, then build ONE commit inlining the Remove by value
     // (atomicity: one commit, not two).
@@ -781,6 +764,86 @@ pub fn mimi_remove_member_commit_appsync_pending_with_authenticated_data(
         .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
         .into_messages();
     staged(opened, &commit, None, &[roster_ref])
+}
+
+/// Stage one commit that removes the member `credential_identity` and adds the member `key_package_bytes` introduces,
+/// with their roster proposal, carrying `authenticated_data` in its PublicMessage framing. One member replaces another
+/// in a single epoch: the group is never without either, and the removed leaf can read nothing after the commit. The
+/// Welcome, JSON `(welcome, ratchet_tree)`, is for the added member; the other members receive the commit. Abandoning it
+/// also withdraws the roster proposal.
+pub fn mimi_replace_member_commit_appsync_pending_with_authenticated_data(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    credential_identity: String,
+    key_package_bytes: Vec<u8>,
+    roster_payload: Vec<u8>,
+    authenticated_data: Vec<u8>,
+) -> anyhow::Result<PendingCommit> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
+    let target_index = member_index(&opened, &credential_identity)?;
+    let validated_kp = validated_key_package(&opened, &key_package_bytes)?;
+
+    let custom = CustomProposal::new(MIMI_PARTICIPANT_LIST_PROPOSAL_TYPE, roster_payload);
+    let (_proposal, roster_ref) = opened
+        .group
+        .propose_custom_proposal_by_value(&opened.provider, &opened.signer, custom)
+        .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
+    // Set after the roster proposal, which would otherwise consume it: the commit is the message that carries it.
+    opened.group.set_aad(authenticated_data);
+    let (commit, welcome, _gi) = opened
+        .group
+        .commit_builder()
+        .consume_proposal_store(true) // include the pending roster custom proposal
+        .propose_removals([target_index]) // the member replaced, by value
+        .propose_adds([validated_kp]) // and the member replacing it, by value
+        .load_psks(opened.provider.storage())
+        .map_err(|e| anyhow::anyhow!("Error loading psks: {:?}", e))?
+        .build(
+            opened.provider.rand(),
+            opened.provider.crypto(),
+            &opened.signer,
+            |_| true,
+        )
+        .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
+        .stage_commit(&opened.provider)
+        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
+        .into_messages();
+    let welcome = welcome.ok_or_else(|| anyhow::anyhow!("Replace commit produced no Welcome"))?;
+    staged(
+        opened,
+        &commit,
+        Some(WelcomeForm::WithRatchetTree(welcome)),
+        &[roster_ref],
+    )
+}
+
+/// The leaf of the member whose basic credential names `credential_identity`.
+fn member_index(opened: &OpenedGroup, credential_identity: &str) -> anyhow::Result<LeafNodeIndex> {
+    opened
+        .group
+        .members()
+        .find(|m| {
+            BasicCredential::try_from(m.credential.clone())
+                .map(|b| b.identity() == credential_identity.as_bytes())
+                .unwrap_or(false)
+        })
+        .map(|m| m.index)
+        .ok_or_else(|| anyhow::anyhow!("Member '{}' not found", credential_identity))
+}
+
+/// A foreign KeyPackage, read and validated, and held to the suite policy before a commit adds it (INV-MLS-002).
+fn validated_key_package(
+    opened: &OpenedGroup,
+    key_package_bytes: &[u8],
+) -> anyhow::Result<KeyPackage> {
+    crate::mls::check_wire_size(key_package_bytes, "mimi KeyPackage")?;
+    let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid KeyPackage: {:?}", e))?;
+    let validated_kp = key_package
+        .validate(opened.provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| anyhow::anyhow!("KeyPackage validation failed: {:?}", e))?;
+    crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
+    Ok(validated_kp)
 }
 
 pub fn mls_process_commit_appsync(
