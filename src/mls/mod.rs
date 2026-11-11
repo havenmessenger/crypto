@@ -6,6 +6,7 @@
 //! them here does not require this crate to depend on any binding layer.
 
 pub(crate) mod capabilities;
+pub mod commit_refusal;
 pub mod entry_codec;
 pub mod groups;
 pub mod inspection;
@@ -61,6 +62,7 @@ pub(crate) fn staged_welcome<Provider: openmls::storage::OpenMlsProvider>(
     }
 }
 
+pub use commit_refusal::{CommitRefusal, CommitRefusalReason};
 pub use own_message::OwnMessage;
 pub use processing_error::ProcessingError;
 

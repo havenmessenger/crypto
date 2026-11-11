@@ -827,7 +827,7 @@ pub fn mls_process_commit_appsync_with(
     crate::mls::own_message::refuse_own_sender(&group, &message)?;
     let processed = group
         .process_message_with_lifetime_policy(&provider, message, lifetimes.leaf_policy())
-        .map_err(|e| anyhow::anyhow!("Processing error: {:?}", e))?;
+        .map_err(|e| anyhow::Error::new(crate::mls::CommitRefusal::processing(&e)))?;
     crate::mls::own_message::refuse_own_content(&processed)?;
     // Read the committer openmls authenticated from the PRE-merge tree, before into_content()
     // consumes the processed message. On the MIMI lane this is the sender an Add's authorization is
@@ -847,7 +847,7 @@ pub fn mls_process_commit_appsync_with(
             }
             group
                 .merge_staged_commit(&provider, *staged)
-                .map_err(|e| anyhow::anyhow!("Error merging staged commit: {:?}", e))?;
+                .map_err(|e| anyhow::Error::new(crate::mls::CommitRefusal::merging(&e)))?;
         }
         _ => {
             return Err(anyhow::anyhow!(
