@@ -79,6 +79,16 @@ target additionally needs `nightly-2026-03-28` - see
 [`docs/REPRODUCIBLE_BUILDS.md`](docs/REPRODUCIBLE_BUILDS.md) for why, and for the full repro
 recipe.
 
+## Verifying a release
+
+Release tags are signed by the Haven Releases key (ed25519, fingerprint `C9DEC6490FCD17B888F927AA02BFC559CF4CF781`). The
+public key is [`RELEASE-KEY.asc`](RELEASE-KEY.asc) in this repository.
+
+```bash
+gpg --import RELEASE-KEY.asc
+git tag -v v0.1.0
+```
+
 ## License
 Copyright 2026 The Haven Authors. Licensed under
 [AGPL-3.0-or-later](LICENSE), with an additional permission under section 7 that makes distribution
