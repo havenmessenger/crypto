@@ -785,6 +785,7 @@ mod suite_gate {
             .collect();
         let bundle = IdentityBundle {
             key_package_bundle: Some(kpb),
+            key_package_bundles: Vec::new(),
             private_key: priv_bytes,
             signature_scheme: scheme,
             public_key_bytes: pub_bytes,
@@ -1174,6 +1175,7 @@ fn last_resort_identity(user_id: &str, now: i64) -> (Vec<u8>, Vec<u8>) {
         .collect();
     let bundle = IdentityBundle {
         key_package_bundle: Some(kpb),
+        key_package_bundles: Vec::new(),
         private_key: priv_bytes,
         signature_scheme: scheme,
         public_key_bytes: pub_bytes,

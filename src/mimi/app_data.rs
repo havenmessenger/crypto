@@ -15,7 +15,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as _, Serialize as _};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{member_index, validated_key_package};
 use crate::mls::pending::{open_group, staged, PendingCommit, WelcomeForm};
@@ -131,6 +131,117 @@ pub fn mimi_regenerate_key_package_app_data(
         now_secs,
         Some(mimi_app_data_capabilities()),
     )
+}
+
+/// The most `KeyPackage`s one call adds: what a provider's hub takes in one publish.
+// LIMIT-REASON: wire-cost: a publish of more is refused by the hub (mimi-hubd MAX_PUBLISH)
+pub const MAX_KEY_PACKAGES_ADDED: usize = 32;
+
+/// The most `KeyPackage`s an identity holds at once: what a provider's hub keeps for one user. Past it, the oldest
+/// one-time `KeyPackage`s are dropped, as the hub drops them.
+// LIMIT-REASON: wire-cost: the hub keeps at most this many per user (mimi-hubd MAX_KEYPACKAGES_PER_USER)
+pub const MAX_KEY_PACKAGES_HELD: usize = 64;
+
+/// `count` new one-time `KeyPackage`s for an identity made by [`mimi_generate_identity_app_data`], and a new
+/// last-resort one when `last_resort` (draft-ietf-mls-extensions, marked by its app data dictionary component), each
+/// advertising [`mimi_app_data_capabilities`]: the bundle that now holds them and their private keys, and the new
+/// `KeyPackage`s to publish.
+///
+/// The `KeyPackage`s the identity already holds stay, since its provider may still hand them out, except those whose
+/// lifetime has ended at `now_secs`, the previous last-resort one when a new one is made, and, past
+/// [`MAX_KEY_PACKAGES_HELD`], the oldest one-time ones. A dropped `KeyPackage` leaves the bundle's storage, so it can
+/// open no Welcome.
+pub fn mimi_add_key_packages(
+    bundle_bytes: Vec<u8>,
+    count: usize,
+    last_resort: bool,
+    now_secs: i64,
+) -> anyhow::Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    anyhow::ensure!(
+        count + usize::from(last_resort) <= MAX_KEY_PACKAGES_ADDED,
+        "at most {MAX_KEY_PACKAGES_ADDED} KeyPackages are added at once"
+    );
+    anyhow::ensure!(count > 0 || last_resort, "no KeyPackage to add");
+    let now = u64::try_from(now_secs)
+        .map_err(|_| anyhow::anyhow!("now_secs must be non-negative, got {now_secs}"))?;
+    let bundle_bytes = Zeroizing::new(bundle_bytes);
+    let mut identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
+    let provider = OpenMlsRustCrypto::default();
+    *provider.storage().values.write().unwrap() =
+        mem::take(&mut identity.storage_map).into_iter().collect();
+
+    let held: Vec<KeyPackageBundle> = identity
+        .key_package_bundle
+        .take()
+        .into_iter()
+        .chain(mem::take(&mut identity.key_package_bundles))
+        .collect();
+    let drop_held = |kpb: &KeyPackageBundle| -> anyhow::Result<()> {
+        let key = crate::mls::groups::kp_storage_key(kpb.key_package(), &provider)?;
+        let removed = provider.storage().values.write().unwrap().remove(&key);
+        if let Some(mut value) = removed {
+            value.zeroize();
+        }
+        Ok(())
+    };
+    let mut kept = Vec::with_capacity(held.len());
+    for kpb in held {
+        let ended = kpb.key_package().life_time().not_after() <= now;
+        if ended || (last_resort && kpb.key_package().last_resort()) {
+            drop_held(&kpb)?;
+        } else {
+            kept.push(kpb);
+        }
+    }
+
+    let signer = MlsSigner {
+        key: Zeroizing::new(identity.private_key.clone()),
+        scheme: identity.signature_scheme,
+    };
+    let credential_with_key = CredentialWithKey {
+        credential: BasicCredential::new(identity.user_id.clone().into_bytes()).into(),
+        signature_key: SignaturePublicKey::try_from(identity.public_key_bytes.clone())
+            .map_err(|_| anyhow::anyhow!("Invalid public key bytes in stored bundle"))?,
+    };
+    let mut added = Vec::with_capacity(count + usize::from(last_resort));
+    for marked in std::iter::repeat_n(false, count).chain(last_resort.then_some(true)) {
+        let builder = KeyPackage::builder()
+            .key_package_extensions(Extensions::empty())
+            .key_package_lifetime(crate::mls::make_lifetime(now)?)
+            .leaf_node_capabilities(mimi_app_data_capabilities());
+        let builder = if marked {
+            builder.mark_as_last_resort()
+        } else {
+            builder
+        };
+        let kpb = builder.build(
+            crate::suite_policy::mls_generation_suite(),
+            &provider,
+            &signer,
+            credential_with_key.clone(),
+        )?;
+        added.push(kpb.key_package().tls_serialize_detached()?);
+        kept.push(kpb);
+    }
+
+    // Past the cap, the oldest one-time KeyPackages go first; a last-resort one is never among them.
+    while kept.len() > MAX_KEY_PACKAGES_HELD {
+        let Some(oldest) = kept.iter().position(|kpb| !kpb.key_package().last_resort()) else {
+            break;
+        };
+        drop_held(&kept.remove(oldest))?;
+    }
+    identity.key_package_bundles = kept;
+    identity.storage_map = provider
+        .storage()
+        .values
+        .read()
+        .unwrap()
+        .clone()
+        .into_iter()
+        .collect();
+    Ok((crate::mls::zeroizing_json(&identity)?.to_vec(), added))
 }
 
 /// A new MIMI room's group, with `components` (id, value) as its app data dictionary. Every member must support the

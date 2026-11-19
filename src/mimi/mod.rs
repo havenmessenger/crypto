@@ -1113,10 +1113,18 @@ fn candidate_retirement(
         .filter(|(key, _)| !candidates.contains(key))
         .cloned()
         .collect();
+    let mut further = Vec::with_capacity(identity.key_package_bundles.len());
+    for kpb in &identity.key_package_bundles {
+        let key = crate::mls::groups::kp_storage_key(kpb.key_package(), provider)?;
+        if !candidates.contains(&key) {
+            further.push(kpb.clone());
+        }
+    }
     let retired = IdentityBundle {
         key_package_bundle: (!field_is_candidate)
             .then(|| identity.key_package_bundle.clone())
             .flatten(),
+        key_package_bundles: further,
         private_key: identity.private_key.clone(),
         signature_scheme: identity.signature_scheme,
         public_key_bytes: identity.public_key_bytes.clone(),

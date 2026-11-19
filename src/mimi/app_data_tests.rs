@@ -538,3 +538,196 @@ fn a_refreshed_key_package_can_still_join_a_room() {
         "PLANT-APP-DATA-REFRESH: the refreshed KeyPackage meets the room's required capabilities",
     );
 }
+
+/// The KeyPackages a bundle holds, as their storage keys, and how many of them are last-resort; checked to be in its
+/// storage by [`held`].
+fn held_unchecked(bundle: &[u8]) -> (Vec<Vec<u8>>, usize, bool) {
+    let identity: crate::mls::IdentityBundle = serde_json::from_slice(bundle).unwrap();
+    let provider = OpenMlsRustCrypto::default();
+    let all: Vec<&KeyPackageBundle> = identity
+        .key_package_bundle
+        .iter()
+        .chain(&identity.key_package_bundles)
+        .collect();
+    let stored: std::collections::HashSet<&Vec<u8>> =
+        identity.storage_map.iter().map(|(k, _)| k).collect();
+    let keys: Vec<Vec<u8>> = all
+        .iter()
+        .map(|kpb| crate::mls::groups::kp_storage_key(kpb.key_package(), &provider).unwrap())
+        .collect();
+    let in_storage = keys.iter().all(|key| stored.contains(key));
+    let last_resort = all
+        .iter()
+        .filter(|kpb| kpb.key_package().last_resort())
+        .count();
+    (keys, last_resort, in_storage)
+}
+
+/// [`held_unchecked`], with every KeyPackage held asserted to be in the bundle's storage.
+fn held(bundle: &[u8]) -> (Vec<Vec<u8>>, usize) {
+    let (keys, last_resort, in_storage) = held_unchecked(bundle);
+    assert!(in_storage, "every KeyPackage held is in storage");
+    (keys, last_resort)
+}
+
+fn storage_key_of(key_package: &[u8]) -> Vec<u8> {
+    let key_package = KeyPackageIn::tls_deserialize_exact(key_package)
+        .unwrap()
+        .validate(
+            OpenMlsRustCrypto::default().crypto(),
+            ProtocolVersion::Mls10,
+        )
+        .unwrap();
+    crate::mls::groups::kp_storage_key(&key_package, &OpenMlsRustCrypto::default()).unwrap()
+}
+
+/// A room of Alice's that adds the member whose KeyPackage is `key_package`: the Welcome.
+fn welcome_for(key_package: Vec<u8>) -> Vec<u8> {
+    let (_, alice) = identity("alice");
+    let room = mimi_create_group_app_data(
+        "room".into(),
+        alice.clone(),
+        vec![(LIST, b"alice".to_vec())],
+    )
+    .unwrap();
+    let pending = mimi_commit_app_data_pending(
+        room,
+        alice,
+        vec![key_package],
+        Vec::new(),
+        vec![(LIST, b"joiner".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .unwrap();
+    pending.welcome().unwrap().to_vec()
+}
+
+/// Join from `welcome` with `bundle`: the bundle to keep afterwards, and whether the join completed.
+fn join_with(welcome: &[u8], bundle: Vec<u8>) -> (Vec<u8>, bool) {
+    match prepare_welcome_retirement(welcome.to_vec(), bundle.clone(), Vec::new(), String::new()) {
+        Err(_) => (bundle, false),
+        Ok(prepared) => match complete_welcome(prepared) {
+            Ok((_, bundle)) => (bundle, true),
+            Err(crate::mimi::MimiWelcomeError::Spent { retired_bundle, .. }) => {
+                (retired_bundle, false)
+            }
+            Err(crate::mimi::MimiWelcomeError::Unspent(_)) => (bundle, false),
+        },
+    }
+}
+
+/// Bob publishes three KeyPackages; a Welcome naming the second spends only that one, so the other two still open
+/// Welcomes and the second never opens another. Revert check: keep every further KeyPackage after a join, and the
+/// spent one is still held.
+#[test]
+fn a_welcome_spends_only_the_key_package_it_names() {
+    let (_, bob) = identity("bob");
+    let (bob, key_packages) = mimi_add_key_packages(bob, 3, false, now_secs()).unwrap();
+    assert_eq!(key_packages.len(), 3);
+    assert_eq!(held(&bob).0.len(), 4, "the first KeyPackage and three more");
+    let (bob, joined) = join_with(&welcome_for(key_packages[1].clone()), bob);
+    assert!(joined);
+    let (keys, _, in_storage) = held_unchecked(&bob);
+    assert!(
+        !keys.contains(&storage_key_of(&key_packages[1])),
+        "PLANT-MIMI-KP-SPENT: the spent KeyPackage is no longer held"
+    );
+    assert!(in_storage);
+    assert_eq!(keys.len(), 3);
+    let (bob, joined) = join_with(&welcome_for(key_packages[0].clone()), bob);
+    assert!(joined, "another KeyPackage still opens a Welcome");
+    let (_, joined) = join_with(&welcome_for(key_packages[1].clone()), bob);
+    assert!(!joined, "the spent one opens no second Welcome");
+}
+
+/// A last-resort KeyPackage opens two Welcomes, and a new one replaces it: the bundle holds one, and the old one opens
+/// nothing more. Revert check: keep the old last-resort KeyPackage when adding a new one, and the bundle holds two.
+#[test]
+fn a_last_resort_key_package_serves_twice_and_a_new_one_replaces_it() {
+    let (_, bob) = identity("bob");
+    let (bob, first) = mimi_add_key_packages(bob, 0, true, now_secs()).unwrap();
+    let (bob, joined) = join_with(&welcome_for(first[0].clone()), bob);
+    assert!(joined);
+    let (bob, joined) = join_with(&welcome_for(first[0].clone()), bob);
+    assert!(
+        joined,
+        "PLANT-MIMI-KP-LAST-RESORT: a last-resort KeyPackage opens a second Welcome"
+    );
+    let (bob, second) = mimi_add_key_packages(bob, 0, true, now_secs()).unwrap();
+    assert_eq!(
+        held(&bob).1,
+        1,
+        "PLANT-MIMI-KP-ONE-LAST-RESORT: one last-resort KeyPackage at a time"
+    );
+    let (bob, joined) = join_with(&welcome_for(first[0].clone()), bob);
+    assert!(!joined, "the replaced one opens nothing");
+    let (_, joined) = join_with(&welcome_for(second[0].clone()), bob);
+    assert!(joined);
+}
+
+/// A KeyPackage whose lifetime has ended is dropped when more are added, and past the cap the oldest one-time ones go,
+/// never the last-resort one. Revert checks: keep ended ones, or skip the cap, and the bundle holds them.
+#[test]
+fn ended_key_packages_and_those_past_the_cap_are_dropped() {
+    let (_, bob) = identity("bob");
+    let now = now_secs();
+    let (bob, early) = mimi_add_key_packages(bob, 2, true, now).unwrap();
+    let later = now + i64::try_from(crate::mls::KP_LIFETIME_SECS).unwrap() + 10;
+    let (bob, _) = mimi_add_key_packages(bob, 1, false, later).unwrap();
+    let (keys, last_resort) = held(&bob);
+    assert_eq!(
+        keys.len(),
+        1,
+        "PLANT-MIMI-KP-ENDED: only the KeyPackage made after the others ended"
+    );
+    assert_eq!(last_resort, 0);
+    assert!(!keys.contains(&storage_key_of(&early[0])));
+
+    let (_, bob) = identity("carol");
+    let (mut bob, _) = mimi_add_key_packages(bob, 1, true, now).unwrap();
+    for _ in 0..3 {
+        bob = mimi_add_key_packages(bob, 31, false, now).unwrap().0;
+    }
+    let (keys, last_resort) = held(&bob);
+    assert_eq!(
+        keys.len(),
+        MAX_KEY_PACKAGES_HELD,
+        "PLANT-MIMI-KP-CAP: an identity holds at most the cap"
+    );
+    assert_eq!(
+        last_resort, 1,
+        "the last-resort KeyPackage is never dropped for the cap"
+    );
+}
+
+#[test]
+fn adding_too_many_or_none_is_refused() {
+    let (_, bob) = identity("bob");
+    assert!(mimi_add_key_packages(bob.clone(), MAX_KEY_PACKAGES_ADDED, true, now_secs()).is_err());
+    assert!(mimi_add_key_packages(bob, 0, false, now_secs()).is_err());
+}
+
+/// The bundle a join persists before it opens the Welcome no longer holds the KeyPackage the Welcome names, and still
+/// holds the others, so a crash between the two leaves no spent KeyPackage live and no live one lost. Revert check:
+/// keep every further KeyPackage in that bundle, and the named one is still held.
+#[test]
+fn the_bundle_persisted_before_a_join_drops_only_the_named_key_package() {
+    let (_, bob) = identity("bob");
+    let (bob, key_packages) = mimi_add_key_packages(bob, 3, false, now_secs()).unwrap();
+    let prepared = prepare_welcome_retirement(
+        welcome_for(key_packages[2].clone()),
+        bob,
+        Vec::new(),
+        String::new(),
+    )
+    .unwrap();
+    let (keys, _, in_storage) = held_unchecked(prepared.retired_bundle());
+    assert!(
+        !keys.contains(&storage_key_of(&key_packages[2])),
+        "PLANT-MIMI-KP-CANDIDATE: the named KeyPackage is retired before the join"
+    );
+    assert!(in_storage);
+    assert!(keys.contains(&storage_key_of(&key_packages[0])));
+    assert!(keys.contains(&storage_key_of(&key_packages[1])));
+}

@@ -160,6 +160,7 @@ pub(crate) fn build_identity_with_capabilities(
 
     let identity_bundle = IdentityBundle {
         key_package_bundle: Some(key_package_bundle),
+        key_package_bundles: Vec::new(),
         private_key: priv_bytes,
         signature_scheme,
         public_key_bytes: pub_bytes,

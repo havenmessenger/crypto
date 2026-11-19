@@ -174,6 +174,8 @@ pub(crate) fn regenerate_key_package_with_capabilities(
     //    signature_scheme, public_key_bytes, and user_id.
     let new_bundle = IdentityBundle {
         key_package_bundle: Some(new_key_package_bundle),
+        // The storage map is replaced with the new KeyPackage's alone, so no other KeyPackage stays live.
+        key_package_bundles: Vec::new(),
         private_key: mem::take(&mut old.private_key),
         signature_scheme: old.signature_scheme,
         public_key_bytes: mem::take(&mut old.public_key_bytes),
@@ -801,10 +803,15 @@ pub(crate) fn retire_consumed_key_package(
         }
     }
     identity.storage_map = kept;
-    // (b): clear the second copy unless the field's own KeyPackage survived the join (last-resort).
+    // (b): clear the second copy unless the field's own KeyPackage survived the join (last-resort), and keep of the
+    // further KeyPackages only those whose own storage entry survived.
     if !field_kp_survives {
         identity.key_package_bundle = None;
     }
+    identity.key_package_bundles.retain(|kpb| {
+        kp_storage_key(kpb.key_package(), provider)
+            .is_ok_and(|storage_key| surviving_keys.contains(&storage_key))
+    });
     crate::mls::zeroizing_json(&identity)
 }
 
@@ -838,6 +845,7 @@ pub(crate) fn conservative_retirement(
         .collect();
     let retired = IdentityBundle {
         key_package_bundle: None,
+        key_package_bundles: Vec::new(),
         private_key: identity.private_key.clone(),
         signature_scheme: identity.signature_scheme,
         public_key_bytes: identity.public_key_bytes.clone(),

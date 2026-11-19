@@ -121,6 +121,12 @@ impl Drop for GroupState {
 pub struct IdentityBundle {
     #[serde(default)]
     pub key_package_bundle: Option<KeyPackageBundle>,
+    /// Further published `KeyPackage`s with their private material, beside `key_package_bundle`: an identity that
+    /// publishes several, so that several members can add it before it publishes again, holds them here, one of them
+    /// at most a last-resort `KeyPackage`. Each is retired as `key_package_bundle` is, once it has opened a Welcome.
+    /// Empty, it is not written, so a bundle that never holds more than one serializes as it always did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_package_bundles: Vec<KeyPackageBundle>,
     pub private_key: Vec<u8>,
     pub signature_scheme: SignatureScheme,
     pub public_key_bytes: Vec<u8>,
