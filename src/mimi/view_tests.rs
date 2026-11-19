@@ -113,6 +113,22 @@ fn a_key_package_view_shows_its_suite_lifetime_and_capabilities() {
     assert!(!view.last_resort);
 }
 
+/// A KeyPackage whose lifetime has ended still has a view, with that lifetime: it is the one a caller asks about when an
+/// add fails. A broken signature is still refused. Revert check: validate the lifetime too, and the view is refused.
+#[test]
+fn an_expired_key_package_view_shows_its_lifetime() {
+    let now = now_secs();
+    let year_ago = now - 365 * 24 * 60 * 60;
+    let (_, key_package, _) =
+        mimi_generate_identity("gus@view.test".to_string(), year_ago).unwrap();
+    let view = mimi_key_package_view(&key_package)
+        .expect("PLANT-VIEW-EXPIRED: an expired KeyPackage has no view");
+    assert!(
+        view.not_after < now as u64,
+        "the lifetime shown is the ended one"
+    );
+}
+
 #[cfg(feature = "mimi-app-data")]
 #[test]
 fn a_last_resort_key_package_view_says_so() {

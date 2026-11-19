@@ -96,6 +96,12 @@ fn list(state: &[u8]) -> Vec<u8> {
 
 /// Alice's room with Bob added by an AppDataUpdate: Alice's state after the commit, Bob's after joining, and the commit.
 fn room_with_bob() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (alice_state, alice, bob_state, welcome, _) = room_with_bob_and_his_bundle();
+    (alice_state, alice, bob_state, welcome)
+}
+
+/// [`room_with_bob`], and Bob's identity bundle.
+fn room_with_bob_and_his_bundle() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     let (_, alice) = identity("alice");
     let (bob_kp, bob) = identity("bob");
     let room = mimi_create_group_app_data(
@@ -116,8 +122,8 @@ fn room_with_bob() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     .unwrap();
     let welcome = pending.welcome().expect("an add has a Welcome").to_vec();
     let alice_state = confirm(pending, &room);
-    let bob_state = join(&welcome, bob);
-    (alice_state, alice, bob_state, welcome)
+    let bob_state = join(&welcome, bob.clone());
+    (alice_state, alice, bob_state, welcome, bob)
 }
 
 /// Every member computes the same list: the committer from its own update, the joiner from the Welcome, an existing
@@ -749,7 +755,7 @@ fn a_refresh_refuses_a_bundle_holding_added_key_packages() {
 /// check: report the epoch before the commit, and the summary disagrees with the view.
 #[test]
 fn a_summarized_commit_says_what_it_did() {
-    let (alice_state, alice, bob_state, _) = room_with_bob();
+    let (alice_state, alice, bob_state, _, bob) = room_with_bob_and_his_bundle();
     let (carol_kp, _) = identity("carol");
     let pending = mimi_commit_app_data_pending(
         alice_state,
@@ -763,8 +769,7 @@ fn a_summarized_commit_says_what_it_did() {
     .unwrap();
     let commit = pending.commit().to_vec();
     let (bob_state, sender, summary) =
-        mimi_process_commit_app_data_summarized(bob_state, identity("bob").1, commit, &append)
-            .unwrap();
+        mimi_process_commit_app_data_summarized(bob_state, bob, commit, &append).unwrap();
     let view = crate::mimi::view::mimi_group_view(&bob_state).unwrap();
     assert_eq!(
         summary.epoch, view.epoch,
@@ -774,12 +779,12 @@ fn a_summarized_commit_says_what_it_did() {
     assert_eq!(summary.committer_leaf, 0, "Alice, the creator");
     assert!(
         summary.proposal_types.contains(&0x0001),
-        "{:?}",
+        "the Add: {:?}",
         summary.proposal_types
     );
     assert!(
-        summary.proposal_types.len() >= 2,
-        "the Add and the AppDataUpdate: {:?}",
+        summary.proposal_types.contains(&0x0008),
+        "the AppDataUpdate: {:?}",
         summary.proposal_types
     );
     assert!(view.components.contains(&LIST), "{:?}", view.components);

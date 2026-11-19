@@ -1,8 +1,9 @@
 //! Read-only views of a MIMI-lane group, a KeyPackage and a processed Commit: what any member of the group can see.
 //!
-//! A view holds identities, leaf indexes, epochs, lifetimes and type codes, and nothing else. No view type has a field
-//! that could carry key material (no private key, exporter or epoch secret, encryption key or signature key), so a
-//! caller that prints a view prints nothing secret. Reading a view changes no state: the group is loaded into a
+//! A view holds identities, leaf indexes, epochs, lifetimes and type codes, and nothing else. No view carries secret
+//! material (no private key, exporter or epoch secret), so a caller that prints a view prints nothing secret. A leaf's
+//! identity is its credential's content: for an X.509 credential that is the certificate chain, which holds the
+//! member's public signature key, as any member of the group can see. Reading a view changes no state: the group is loaded into a
 //! scratch provider whose storage is wiped when it is dropped.
 
 use openmls::prelude::*;
@@ -137,15 +138,18 @@ pub fn mimi_group_view(group_state_bytes: &[u8]) -> anyhow::Result<MimiGroupView
     .map_err(|_| anyhow::anyhow!("Invalid local MLS group state"))?
 }
 
-/// The view of a KeyPackage, from its TLS encoding (as published). It is validated first (RFC 9420 §10.1), so a view
-/// is only ever of a well-formed, correctly signed KeyPackage.
+/// The view of a KeyPackage, from its TLS encoding (as published). Its signature is checked first (RFC 9420 §10.1), so
+/// a view is only ever of a well-formed, correctly signed KeyPackage; its lifetime is not, since a KeyPackage whose
+/// lifetime has ended or not begun is the one a caller asks about when an add fails, and the caller reads the lifetime
+/// against its own clock.
 pub fn mimi_key_package_view(key_package_bytes: &[u8]) -> anyhow::Result<MimiKeyPackageView> {
     crate::mls::check_wire_size(key_package_bytes, "mimi KeyPackage view")?;
     let key_package = KeyPackageIn::tls_deserialize_exact(key_package_bytes)
         .map_err(|_| anyhow::anyhow!("Invalid KeyPackage"))?
-        .validate(
+        .validate_with_lifetime_policy(
             OpenMlsRustCrypto::default().crypto(),
             ProtocolVersion::Mls10,
+            crate::mls::JoinLifetimes::Skip.leaf_policy(),
         )
         .map_err(|_| anyhow::anyhow!("KeyPackage does not validate"))?;
     let capabilities = key_package.leaf_node().capabilities();
