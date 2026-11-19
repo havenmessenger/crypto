@@ -513,7 +513,7 @@ fn locked(name: &str) -> (String, String) {
 
 #[test]
 fn the_openmls_revision_that_the_key_mirror_was_checked_against_has_not_changed() {
-    let source = "git+https://github.com/openmls/openmls?rev=28369d5b48608bef4ddf8371d91503b0f3852bb3#28369d5b48608bef4ddf8371d91503b0f3852bb3";
+    let source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83";
     for (name, version) in [
         ("openmls", "0.9.0"),
         ("openmls_memory_storage", "0.6.0"),
