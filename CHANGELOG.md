@@ -5,6 +5,12 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- A feature, `mimi-app-data` (off by default), for MIMI rooms whose state lives in the GroupContext's app data dictionary
+  and changes by AppDataUpdate proposals (draft-ietf-mls-extensions §4.6-4.7, draft-ietf-mimi-room-policy): identities
+  and groups that support it, a staged commit that adds and removes members with AppDataUpdates, and processing such a
+  commit. What a component's value means stays the caller's: the committer and every receiver compute it with the same
+  function the caller gives. The feature turns on openmls's `extensions-draft`, under which openmls also marks a
+  last-resort KeyPackage with an app data dictionary component instead of the `last_resort` extension.
 - openmls moves to its main branch as of 2026-11-18, the commit `Cargo.toml` pins. Commits list their Update, Remove and SelfRemove
   proposals in ascending leaf order; the other changes are in features this crate does not enable.
 

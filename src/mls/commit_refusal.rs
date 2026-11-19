@@ -88,6 +88,8 @@ const fn of_processing<S>(refusal: &ProcessMessageError<S>) -> CommitRefusalReas
         | ProcessMessageError::GroupStateError(_)
         | ProcessMessageError::UnauthorizedExternalApplicationMessage
         | ProcessMessageError::UnauthorizedExternalCommitMessage => Other,
+        #[cfg(feature = "mimi-app-data")]
+        ProcessMessageError::MalformedSafeAad => Other,
     }
 }
 
@@ -150,6 +152,9 @@ const fn of_staging(refusal: &StageCommitError) -> CommitRefusalReason {
         | StageCommitError::MissingDecryptionKey
         | StageCommitError::VerifiedUpdatePathError(_)
         | StageCommitError::DuplicatePskId(_) => Other,
+        #[cfg(feature = "mimi-app-data")]
+        StageCommitError::AppDataUpdateValidationError(_)
+        | StageCommitError::ApplyAppDataUpdateError(_) => Other,
     }
 }
 
@@ -211,6 +216,8 @@ const fn of_key_package(refusal: &KeyPackageVerifyError) -> CommitRefusalReason 
         KeyPackageVerifyError::LibraryError(_)
         | KeyPackageVerifyError::InvalidLeafNodeSourceType
         | KeyPackageVerifyError::InitKeyEqualsEncryptionKey => Other,
+        #[cfg(feature = "mimi-app-data")]
+        KeyPackageVerifyError::MalformedLastResortComponent => Other,
     }
 }
 

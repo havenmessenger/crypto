@@ -21,6 +21,17 @@ license = "AGPL-3.0-or-later"
 [lib]
 crate-type = ["rlib"]
 
+[features]
+default = []
+# The MIMI lane's rooms keep their participant list in the GroupContext's app data dictionary and change it with
+# AppDataUpdate proposals (draft-ietf-mls-extensions, draft-ietf-mimi-room-policy). Off by default: only a consumer of
+# the MIMI lane turns it on, so a build without it carries none of openmls's extensions draft.
+mimi-app-data = [
+    "openmls/extensions-draft",
+    "openmls_rust_crypto/extensions-draft",
+    "openmls_traits/extensions-draft",
+]
+
 [dependencies]
 anyhow = "1.0.100"
 getrandom = { version = "0.2", features = ["js"] }

@@ -1113,6 +1113,12 @@ fn a_consumed_keypackage_cannot_open_a_second_welcome() {
 /// Build an `IdentityBundle` whose KeyPackage carries the last-resort extension. A last-resort
 /// KeyPackage is the RFC 9420 §16.8 exception to single-use: it may open more than one Welcome, so
 /// `process_welcome` must NOT retire it. Test-only.
+/// The extension openmls marks a last-resort KeyPackage with in this build.
+#[cfg(not(feature = "mimi-app-data"))]
+const LAST_RESORT_CARRIER: ExtensionType = ExtensionType::LastResort;
+#[cfg(feature = "mimi-app-data")]
+const LAST_RESORT_CARRIER: ExtensionType = ExtensionType::AppDataDictionary;
+
 fn last_resort_identity(user_id: &str, now: i64) -> (Vec<u8>, Vec<u8>) {
     use openmls::ciphersuite::signature::SignaturePublicKey;
     use openmls::credentials::{BasicCredential, CredentialWithKey};
@@ -1139,12 +1145,13 @@ fn last_resort_identity(user_id: &str, now: i64) -> (Vec<u8>, Vec<u8>) {
     let kpb = KeyPackage::builder()
         .key_package_extensions(Extensions::empty())
         .key_package_lifetime(lifetime)
-        // A KeyPackage carrying the LastResort extension must advertise it in the leaf's
-        // capabilities, or add_member's KeyPackage validation rejects it (UnsupportedExtension).
+        // A KeyPackage marked last resort must advertise the extension that carries the mark, or add_member's
+        // KeyPackage validation rejects it (UnsupportedExtension). Under `mimi-app-data` openmls carries it as a
+        // component of the KeyPackage's app data dictionary rather than as the legacy LastResort extension.
         .leaf_node_capabilities(Capabilities::new(
             None,
             Some(&[crate::suite_policy::mls_generation_suite()]),
-            Some(&[ExtensionType::LastResort]),
+            Some(&[LAST_RESORT_CARRIER]),
             None,
             Some(&[CredentialType::Basic]),
         ))

@@ -43,6 +43,9 @@ use std::mem;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(feature = "mimi-app-data")]
+pub mod app_data;
+
 use crate::mls::pending::{open_group, staged, OpenedGroup, PendingCommit, WelcomeForm};
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
 
@@ -489,6 +492,12 @@ pub fn mimi_accept_external_remove_proposal_pending(
         ProcessedMessageContent::ApplicationMessage(_) => {
             return Err(anyhow::anyhow!(
                 "Expected a staged proposal, got an ApplicationMessage"
+            ))
+        }
+        #[cfg(feature = "mimi-app-data")]
+        ProcessedMessageContent::UnresolvedAppDataCommit(_) => {
+            return Err(anyhow::anyhow!(
+                "Expected a staged proposal, got an UnresolvedAppDataCommit"
             ))
         }
         ProcessedMessageContent::ExternalJoinProposalMessage(_) => {

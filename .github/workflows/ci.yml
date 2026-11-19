@@ -43,6 +43,10 @@ jobs:
       - name: test
         # guard #2: this job IS the standalone clean-room build (fresh checkout, nothing else present)
         run: cargo test
+      - name: clippy and test with mimi-app-data
+        # The feature turns on openmls's extensions draft, which adds enum variants and changes how openmls marks a
+        # last-resort KeyPackage, so the crate is linted and tested in that state too.
+        run: cargo clippy --lib --features mimi-app-data -- -D warnings && cargo test --features mimi-app-data
       - name: audit
         # `cargo audit` auto-reads .cargo/audit.toml if present, so documented advisory
         # dispositions (e.g. the RSA Marvin / libcrux-phantom notes) apply.

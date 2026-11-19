@@ -78,6 +78,24 @@ pub fn build_identity_from_keypair(
     // so production identities are unaffected (INV-MLS-002 + trinity untouched).
     appsync_caps: bool,
 ) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+    // The `false` branch is the production path, advertising what it always has. The `true` branch advertises the
+    // mimiParticipantList custom proposal so AppSync commits validate.
+    let capabilities = if appsync_caps {
+        crate::mimi::mimi_appsync_capabilities()
+    } else {
+        crate::mls::capabilities::plain_leaf_capabilities()
+    };
+    build_identity_with_capabilities(user_id, now_secs, priv_bytes, pub_bytes, capabilities)
+}
+
+/// [`build_identity_from_keypair`] with the leaf's capabilities given.
+pub(crate) fn build_identity_with_capabilities(
+    user_id: String,
+    now_secs: i64,
+    priv_bytes: Vec<u8>,
+    pub_bytes: Vec<u8>,
+    capabilities: Capabilities,
+) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
     let provider = OpenMlsRustCrypto::default();
 
     let signature_scheme = SignatureScheme::ED25519;
@@ -106,29 +124,12 @@ pub fn build_identity_from_keypair(
     let kp_builder = KeyPackage::builder()
         .key_package_extensions(Extensions::empty())
         .key_package_lifetime(lifetime);
-    // The `false` branch is the production path, advertising what it always has. The `true`
-    // branch (MIMI demo) advertises the mimiParticipantList custom proposal so AppSync commits validate.
-    let key_package_bundle = if appsync_caps {
-        kp_builder
-            // `mimi_appsync_capabilities` lives in `crate::mimi`; a consuming application
-            // re-exports it, and another in-repo consumer reuses it directly.
-            .leaf_node_capabilities(crate::mimi::mimi_appsync_capabilities())
-            .build(
-                crate::suite_policy::mls_generation_suite(),
-                &provider,
-                &signer,
-                credential_with_key,
-            )?
-    } else {
-        kp_builder
-            .leaf_node_capabilities(crate::mls::capabilities::plain_leaf_capabilities())
-            .build(
-                crate::suite_policy::mls_generation_suite(),
-                &provider,
-                &signer,
-                credential_with_key,
-            )?
-    };
+    let key_package_bundle = kp_builder.leaf_node_capabilities(capabilities).build(
+        crate::suite_policy::mls_generation_suite(),
+        &provider,
+        &signer,
+        credential_with_key,
+    )?;
 
     let key_package = key_package_bundle.key_package();
     let key_package_bytes = key_package.tls_serialize_detached()?;
