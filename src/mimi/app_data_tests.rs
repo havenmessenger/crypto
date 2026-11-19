@@ -232,3 +232,124 @@ fn a_removal_and_its_list_update_ride_one_commit() {
     assert_eq!(list(&alice_state), list(&bob_state));
     assert_eq!(list(&bob_state), b"alice,bob,carol,-carol");
 }
+
+struct Member {
+    state: Vec<u8>,
+    bundle: Vec<u8>,
+}
+
+/// Alice's room with Bob and Carol in it, every member's state and identity.
+fn three_member_room() -> (Member, Member, Member) {
+    let (_, alice) = identity("alice");
+    let (bob_kp, bob) = identity("bob");
+    let (carol_kp, carol) = identity("carol");
+    let room = mimi_create_group_app_data(
+        "room".into(),
+        alice.clone(),
+        vec![(LIST, b"alice".to_vec())],
+    )
+    .unwrap();
+    let pending = mimi_commit_app_data_pending(
+        room.clone(),
+        alice.clone(),
+        vec![bob_kp, carol_kp],
+        Vec::new(),
+        vec![(LIST, b"bob".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .unwrap();
+    let welcome = pending.welcome().unwrap().to_vec();
+    let alice_state = confirm(pending, &room);
+    let bob_state = join(&welcome, bob.clone());
+    let carol_state = join(&welcome, carol.clone());
+    (
+        Member {
+            state: alice_state,
+            bundle: alice,
+        },
+        Member {
+            state: bob_state,
+            bundle: bob,
+        },
+        Member {
+            state: carol_state,
+            bundle: carol,
+        },
+    )
+}
+
+/// The proposals of Bob's leave, stored by `member`.
+fn store(member: &mut Member, proposals: &[Vec<u8>]) {
+    for proposal in proposals {
+        member.state = mimi_process_proposal_app_data(
+            member.state.clone(),
+            member.bundle.clone(),
+            proposal.clone(),
+        )
+        .expect("a member's leave proposal is stored");
+    }
+}
+
+/// A member leaves by proposals; the others store them, and the next commit includes them by reference and resolves
+/// the leave's list update as every receiver does. Revert check: resolve only the commit's own updates and the commit
+/// is not built.
+#[test]
+fn a_leave_by_proposals_is_committed_by_reference_and_every_member_agrees() {
+    let (mut alice, bob, mut carol) = three_member_room();
+    let (_, proposals) = mimi_leave_app_data(
+        bob.state,
+        bob.bundle,
+        vec![(LIST, b"-bob".to_vec())],
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        proposals.len(),
+        2,
+        "a Remove of Bob's leaf and the list update"
+    );
+    store(&mut alice, &proposals);
+    store(&mut carol, &proposals);
+    let pending = mimi_commit_app_data_pending(
+        alice.state.clone(),
+        alice.bundle.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &append,
+        Vec::new(),
+    )
+    .expect("PLANT-APP-DATA-BYREF: the commit resolves the leave's update");
+    let commit = pending.commit().to_vec();
+    let alice_state = confirm(pending, &alice.state);
+    let (carol_state, _) = mimi_process_commit_app_data(carol.state, carol.bundle, commit, &append)
+        .expect("Carol takes the commit");
+    assert_eq!(list(&alice_state), b"alice,bob,-bob");
+    assert_eq!(list(&carol_state), list(&alice_state));
+}
+
+/// A pending leave's list update and the commit's own change to the list cannot ride one commit: committer and
+/// receivers would have no agreed order between them.
+#[test]
+fn a_commit_changing_a_component_twice_is_refused() {
+    let (mut alice, bob, _) = three_member_room();
+    let (_, proposals) = mimi_leave_app_data(
+        bob.state,
+        bob.bundle,
+        vec![(LIST, b"-bob".to_vec())],
+        Vec::new(),
+    )
+    .unwrap();
+    store(&mut alice, &proposals);
+    assert!(mimi_commit_app_data_pending(
+        alice.state,
+        alice.bundle,
+        Vec::new(),
+        Vec::new(),
+        vec![(LIST, b"dan".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .is_err());
+}

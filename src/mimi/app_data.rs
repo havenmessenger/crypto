@@ -14,7 +14,7 @@ use openmls::prelude::*;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::OpenMlsProvider;
-use tls_codec::Deserialize as _;
+use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
 
 use super::{member_index, validated_key_package};
@@ -169,10 +169,26 @@ pub fn mimi_commit_app_data_pending(
         .propose_removals(leaves)
         .load_psks(opened.provider.storage())
         .map_err(|e| anyhow::anyhow!("Error loading psks: {:?}", e))?;
+    // Every AppDataUpdate the commit covers: those other members proposed (a leave), included by reference, and this
+    // commit's own. One operation per component, so committer and receivers apply them in the same order.
+    let operations: Vec<(u16, AppDataUpdateOperation)> = stage
+        .app_data_update_proposals()
+        .map(|proposal| (proposal.component_id(), proposal.operation().clone()))
+        .collect();
+    let touched: BTreeSet<u16> = operations.iter().map(|(component, _)| *component).collect();
+    anyhow::ensure!(
+        touched.len() == operations.len(),
+        "the commit would change a component more than once; commit the pending change first"
+    );
     let mut values = stage.app_data_dictionary_updater();
-    for (component, update) in &updates {
-        let value = resolve(*component, values.old_value(*component), update)?;
-        values.set(ComponentData::from_parts(*component, value.into()));
+    for (component, operation) in &operations {
+        match operation {
+            AppDataUpdateOperation::Remove => values.remove(component),
+            AppDataUpdateOperation::Update(update) => {
+                let value = resolve(*component, values.old_value(*component), update.as_slice())?;
+                values.set(ComponentData::from_parts(*component, value.into()));
+            }
+        }
     }
     let changes = values.changes();
     stage.with_app_data_dictionary_updates(changes);
@@ -193,6 +209,109 @@ pub fn mimi_commit_app_data_pending(
         welcome.map(WelcomeForm::WithRatchetTree),
         &[],
     )
+}
+
+/// Leave a MIMI room: a Remove of this member's own leaf and an AppDataUpdate for each `(component, update)`, the
+/// proposals the room's next commit includes by reference (draft-ietf-mimi-protocol §5.3). The group state with them
+/// queued, and the proposals as MLSMessage bytes in the order to send them.
+pub fn mimi_leave_app_data(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    updates: Vec<(u16, Vec<u8>)>,
+    authenticated_data: Vec<u8>,
+) -> anyhow::Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    let mut opened = open_group(group_state_bytes, bundle_bytes)?;
+    let mut proposals = Vec::with_capacity(updates.len() + 1);
+    opened.group.set_aad(authenticated_data.clone());
+    let remove = opened
+        .group
+        .leave_group(&opened.provider, &opened.signer)
+        .map_err(|e| anyhow::anyhow!("Error proposing the leave: {:?}", e))?;
+    proposals.push(remove.tls_serialize_detached()?);
+    for (component, update) in updates {
+        opened.group.set_aad(authenticated_data.clone());
+        let (proposal, _) = opened
+            .group
+            .propose_app_data_update(
+                &opened.provider,
+                &opened.signer,
+                component,
+                AppDataUpdateOperation::Update(update.into()),
+            )
+            .map_err(|e| anyhow::anyhow!("Error proposing the app data update: {:?}", e))?;
+        proposals.push(proposal.tls_serialize_detached()?);
+    }
+    let state = GroupState {
+        group_id: opened.group.group_id().to_vec(),
+        storage_map: opened
+            .provider
+            .storage()
+            .values
+            .read()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .collect(),
+    };
+    Ok((crate::mls::zeroizing_json(&state)?.to_vec(), proposals))
+}
+
+/// Take another member's proposal to a MIMI room for the room's next commit: the group state holding it. Only a
+/// member's Remove or AppDataUpdate is taken, the proposals a leave sends; anything else is refused, so a commit that
+/// includes the stored proposals carries nothing this member did not vet.
+pub fn mimi_process_proposal_app_data(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    proposal_bytes: Vec<u8>,
+) -> anyhow::Result<Vec<u8>> {
+    let group_state_bytes = Zeroizing::new(group_state_bytes);
+    let _bundle_bytes = Zeroizing::new(bundle_bytes);
+    let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid group state: {:?}", e))?;
+    let provider = OpenMlsRustCrypto::default();
+    *provider.storage().values.write().unwrap() =
+        mem::take(&mut state.storage_map).into_iter().collect();
+    let mut group = MlsGroup::load(provider.storage(), &GroupId::from_slice(&state.group_id))
+        .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
+        .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
+    crate::mls::check_wire_size(&proposal_bytes, "mimi_process_proposal_app_data proposal")?;
+    let message = ProtocolMessage::try_from(MlsMessageIn::tls_deserialize_exact(
+        proposal_bytes.as_slice(),
+    )?)
+    .map_err(|e| anyhow::anyhow!("Invalid protocol message: {:?}", e))?;
+    crate::mls::own_message::refuse_own_sender(&group, &message)?;
+    let processed = group
+        .process_message(&provider, message)
+        .map_err(|e| anyhow::anyhow!("Error processing the proposal: {:?}", e))?;
+    let ProcessedMessageContent::ProposalMessage(queued) = processed.into_content() else {
+        anyhow::bail!("Expected a proposal");
+    };
+    anyhow::ensure!(
+        matches!(queued.sender(), Sender::Member(_)),
+        "a room's proposals are taken only from its members"
+    );
+    anyhow::ensure!(
+        matches!(
+            queued.proposal(),
+            Proposal::Remove(_) | Proposal::AppDataUpdate(_)
+        ),
+        "only a member's Remove or AppDataUpdate is taken for the next commit"
+    );
+    group
+        .store_pending_proposal(provider.storage(), *queued)
+        .map_err(|e| anyhow::anyhow!("Error storing the proposal: {:?}", e))?;
+    let new_state = GroupState {
+        group_id: mem::take(&mut state.group_id),
+        storage_map: provider
+            .storage()
+            .values
+            .read()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .collect(),
+    };
+    Ok(crate::mls::zeroizing_json(&new_state)?.to_vec())
 }
 
 /// Take another member's commit to a MIMI room: the group state after it, and the member openmls authenticated as its
