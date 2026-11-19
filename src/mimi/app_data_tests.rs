@@ -16,22 +16,33 @@ fn now_secs() -> i64 {
     .unwrap()
 }
 
-/// A stand-in for the participant list's rules: the value is the names, comma separated, and an update appends one.
-fn append(_: u16, before: Option<&[u8]>, update: &[u8]) -> anyhow::Result<Vec<u8>> {
+/// A stand-in for the participant list's rules: the value is the names, comma separated, an update appends one, and
+/// a removal is allowed.
+fn append(_: u16, before: Option<&[u8]>, change: Change<'_>) -> anyhow::Result<Option<Vec<u8>>> {
+    let Change::Update(update) = change else {
+        return Ok(None);
+    };
     anyhow::ensure!(!update.contains(&b','), "a name has no comma");
-    Ok(match before {
+    Ok(Some(match before {
         Some(list) if !list.is_empty() => [list, b",", update].concat(),
         _ => update.to_vec(),
-    })
+    }))
 }
 
 /// A member whose rules differ: it appends with a semicolon.
-fn append_differently(_: u16, before: Option<&[u8]>, update: &[u8]) -> anyhow::Result<Vec<u8>> {
-    Ok([before.unwrap_or_default(), b";", update].concat())
+fn append_differently(
+    _: u16,
+    before: Option<&[u8]>,
+    change: Change<'_>,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let Change::Update(update) = change else {
+        return Ok(None);
+    };
+    Ok(Some([before.unwrap_or_default(), b";", update].concat()))
 }
 
-fn refuse(_: u16, _: Option<&[u8]>, _: &[u8]) -> anyhow::Result<Vec<u8>> {
-    anyhow::bail!("this member's rules refuse the update")
+fn refuse(_: u16, _: Option<&[u8]>, _: Change<'_>) -> anyhow::Result<Option<Vec<u8>>> {
+    anyhow::bail!("this member's rules refuse the change")
 }
 
 fn identity(name: &str) -> (Vec<u8>, Vec<u8>) {
@@ -170,26 +181,16 @@ fn a_member_whose_rules_disagree_refuses_the_commit() {
     );
 }
 
-/// The committer's own rules refusing an update build no commit, and one commit updates a component once.
+/// The committer's own rules refusing an update build no commit.
 #[test]
 fn a_commit_the_committers_rules_refuse_is_not_built() {
     let (alice_state, alice, _, _) = room_with_bob();
-    assert!(mimi_commit_app_data_pending(
-        alice_state.clone(),
-        alice.clone(),
-        Vec::new(),
-        Vec::new(),
-        vec![(LIST, b"eve,mallory".to_vec())],
-        &append,
-        Vec::new(),
-    )
-    .is_err());
     assert!(mimi_commit_app_data_pending(
         alice_state,
         alice,
         Vec::new(),
         Vec::new(),
-        vec![(LIST, b"x".to_vec()), (LIST, b"y".to_vec())],
+        vec![(LIST, b"eve,mallory".to_vec())],
         &append,
         Vec::new(),
     )
@@ -238,44 +239,49 @@ struct Member {
     bundle: Vec<u8>,
 }
 
-/// Alice's room with Bob and Carol in it, every member's state and identity.
-fn three_member_room() -> (Member, Member, Member) {
-    let (_, alice) = identity("alice");
-    let (bob_kp, bob) = identity("bob");
-    let (carol_kp, carol) = identity("carol");
-    let room = mimi_create_group_app_data(
+/// A room `names[0]` created, every other name added in one commit whose list update appends "added"; every member's
+/// state and identity, in the order of `names`.
+fn room(names: &[&str]) -> Vec<Member> {
+    let (_, creator) = identity(names[0]);
+    let state = mimi_create_group_app_data(
         "room".into(),
-        alice.clone(),
-        vec![(LIST, b"alice".to_vec())],
+        creator.clone(),
+        vec![(LIST, names[0].as_bytes().to_vec())],
     )
     .unwrap();
+    let (key_packages, bundles): (Vec<_>, Vec<_>) =
+        names[1..].iter().map(|name| identity(name)).unzip();
     let pending = mimi_commit_app_data_pending(
-        room.clone(),
-        alice.clone(),
-        vec![bob_kp, carol_kp],
+        state.clone(),
+        creator.clone(),
+        key_packages,
         Vec::new(),
-        vec![(LIST, b"bob".to_vec())],
+        vec![(LIST, b"added".to_vec())],
         &append,
         Vec::new(),
     )
     .unwrap();
     let welcome = pending.welcome().unwrap().to_vec();
-    let alice_state = confirm(pending, &room);
-    let bob_state = join(&welcome, bob.clone());
-    let carol_state = join(&welcome, carol.clone());
+    let mut members = vec![Member {
+        state: confirm(pending, &state),
+        bundle: creator,
+    }];
+    for bundle in bundles {
+        members.push(Member {
+            state: join(&welcome, bundle.clone()),
+            bundle,
+        });
+    }
+    members
+}
+
+/// Alice's room with Bob and Carol in it.
+fn three_member_room() -> (Member, Member, Member) {
+    let mut members = room(&["alice", "bob", "carol"]).into_iter();
     (
-        Member {
-            state: alice_state,
-            bundle: alice,
-        },
-        Member {
-            state: bob_state,
-            bundle: bob,
-        },
-        Member {
-            state: carol_state,
-            bundle: carol,
-        },
+        members.next().unwrap(),
+        members.next().unwrap(),
+        members.next().unwrap(),
     )
 }
 
@@ -325,15 +331,15 @@ fn a_leave_by_proposals_is_committed_by_reference_and_every_member_agrees() {
     let alice_state = confirm(pending, &alice.state);
     let (carol_state, _) = mimi_process_commit_app_data(carol.state, carol.bundle, commit, &append)
         .expect("Carol takes the commit");
-    assert_eq!(list(&alice_state), b"alice,bob,-bob");
+    assert_eq!(list(&alice_state), b"alice,added,-bob");
     assert_eq!(list(&carol_state), list(&alice_state));
 }
 
-/// A pending leave's list update and the commit's own change to the list cannot ride one commit: committer and
-/// receivers would have no agreed order between them.
+/// A pending leave's list update and the commit's own update to the list ride one commit: each is resolved, in the
+/// commit's order, from the value the one before it left, and a receiver agrees.
 #[test]
-fn a_commit_changing_a_component_twice_is_refused() {
-    let (mut alice, bob, _) = three_member_room();
+fn a_pending_leave_and_the_commits_own_update_to_the_list_both_apply() {
+    let (mut alice, bob, mut carol) = three_member_room();
     let (_, proposals) = mimi_leave_app_data(
         bob.state,
         bob.bundle,
@@ -342,14 +348,156 @@ fn a_commit_changing_a_component_twice_is_refused() {
     )
     .unwrap();
     store(&mut alice, &proposals);
-    assert!(mimi_commit_app_data_pending(
-        alice.state,
-        alice.bundle,
+    store(&mut carol, &proposals);
+    let pending = mimi_commit_app_data_pending(
+        alice.state.clone(),
+        alice.bundle.clone(),
         Vec::new(),
         Vec::new(),
         vec![(LIST, b"dan".to_vec())],
         &append,
         Vec::new(),
     )
-    .is_err());
+    .expect("two updates to one component ride one commit");
+    let commit = pending.commit().to_vec();
+    let alice_state = confirm(pending, &alice.state);
+    assert_eq!(list(&alice_state), b"alice,added,-bob,dan");
+    let (carol_state, _) = mimi_process_commit_app_data(carol.state, carol.bundle, commit, &append)
+        .expect("Carol resolves the two updates in the same order");
+    assert_eq!(list(&carol_state), list(&alice_state));
+}
+
+/// Bob and Carol leave together and Alice commits both leaves; Dave, who stored them in the other order, takes the
+/// commit. Revert check: resolve every update from the value before the commit, and one leave is lost from the list.
+#[test]
+fn two_members_leaving_together_are_committed_in_one_commit() {
+    let mut members = room(&["alice", "bob", "carol", "dave"]).into_iter();
+    let (mut alice, bob, carol, mut dave) = (
+        members.next().unwrap(),
+        members.next().unwrap(),
+        members.next().unwrap(),
+        members.next().unwrap(),
+    );
+    let (_, bob_leave) = mimi_leave_app_data(
+        bob.state,
+        bob.bundle,
+        vec![(LIST, b"-bob".to_vec())],
+        Vec::new(),
+    )
+    .unwrap();
+    let (_, carol_leave) = mimi_leave_app_data(
+        carol.state,
+        carol.bundle,
+        vec![(LIST, b"-carol".to_vec())],
+        Vec::new(),
+    )
+    .unwrap();
+    store(&mut alice, &bob_leave);
+    store(&mut alice, &carol_leave);
+    store(&mut dave, &carol_leave);
+    store(&mut dave, &bob_leave);
+    let pending = mimi_commit_app_data_pending(
+        alice.state.clone(),
+        alice.bundle.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        &append,
+        Vec::new(),
+    )
+    .expect("both leaves ride one commit");
+    let commit = pending.commit().to_vec();
+    let alice_state = confirm(pending, &alice.state);
+    let value = String::from_utf8(list(&alice_state)).unwrap();
+    assert!(
+        value.split(',').filter(|name| *name == "-bob").count() == 1
+            && value.split(',').filter(|name| *name == "-carol").count() == 1,
+        "PLANT-APP-DATA-RUNNING: each leave's update applies once, got {value}"
+    );
+    let (dave_state, _) = mimi_process_commit_app_data(dave.state, dave.bundle, commit, &append)
+        .expect("Dave resolves the leaves in the commit's order");
+    assert_eq!(list(&dave_state), list(&alice_state));
+}
+
+/// Carol's proposal to remove Bob is not a leave: Alice doesn't store it for her next commit.
+#[test]
+fn a_members_remove_of_another_member_is_not_taken() {
+    let (alice, _bob, carol) = three_member_room();
+    let mut opened = open_group(carol.state, carol.bundle).unwrap();
+    let bob_leaf = member_index(&opened, "mimi://hub.example/u/bob").unwrap();
+    let (proposal, _) = opened
+        .group
+        .propose_remove_member(&opened.provider, &opened.signer, bob_leaf)
+        .unwrap();
+    let proposal = proposal.tls_serialize_detached().unwrap();
+    assert!(
+        mimi_process_proposal_app_data(alice.state, alice.bundle, proposal).is_err(),
+        "PLANT-APP-DATA-OWN-REMOVE: a Remove of another member is refused"
+    );
+}
+
+/// Carol's proposal to remove the list component is not a leave: Alice doesn't store it for her next commit.
+#[test]
+fn a_members_proposal_removing_a_component_is_not_taken() {
+    let (alice, _bob, carol) = three_member_room();
+    let mut opened = open_group(carol.state, carol.bundle).unwrap();
+    let (proposal, _) = opened
+        .group
+        .propose_app_data_update(
+            &opened.provider,
+            &opened.signer,
+            LIST,
+            AppDataUpdateOperation::Remove,
+        )
+        .unwrap();
+    let proposal = proposal.tls_serialize_detached().unwrap();
+    assert!(
+        mimi_process_proposal_app_data(alice.state, alice.bundle, proposal).is_err(),
+        "PLANT-APP-DATA-NO-COMPONENT-REMOVAL: a component's removal is refused"
+    );
+}
+
+/// A commit removing a component, as another client may send one: the receiver's rules judge the removal like any
+/// change, and refuse it when they refuse every change. Revert check: apply a removal without asking the rules.
+#[test]
+fn a_commit_removing_a_component_is_judged_by_the_receivers_rules() {
+    let (alice, _bob, carol) = three_member_room();
+    let mut opened = open_group(carol.state, carol.bundle).unwrap();
+    let mut stage = opened
+        .group
+        .commit_builder()
+        .add_proposals([Proposal::AppDataUpdate(Box::new(
+            AppDataUpdateProposal::remove(LIST),
+        ))])
+        .load_psks(opened.provider.storage())
+        .unwrap();
+    let mut updater = stage.app_data_dictionary_updater();
+    updater.remove(&LIST);
+    let changes = updater.changes();
+    stage.with_app_data_dictionary_updates(changes);
+    let (commit, _, _) = stage
+        .build(
+            opened.provider.rand(),
+            opened.provider.crypto(),
+            &opened.signer,
+            |_| true,
+        )
+        .unwrap()
+        .stage_commit(&opened.provider)
+        .unwrap()
+        .into_messages();
+    let commit = commit.tls_serialize_detached().unwrap();
+    assert!(
+        mimi_process_commit_app_data(
+            alice.state.clone(),
+            alice.bundle.clone(),
+            commit.clone(),
+            &refuse
+        )
+        .is_err(),
+        "PLANT-APP-DATA-REMOVAL-JUDGED: the receiver's rules refuse the removal"
+    );
+    let (alice_state, _) = mimi_process_commit_app_data(alice.state, alice.bundle, commit, &append)
+        .expect("rules that allow the removal take the commit");
+    assert_eq!(mimi_app_data_value(&alice_state, LIST).unwrap(), None);
 }

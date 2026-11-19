@@ -1,12 +1,12 @@
 //! MIMI rooms whose state lives in the GroupContext's app data dictionary (draft-ietf-mls-extensions §4.6, §4.7), such
 //! as the participant list (draft-ietf-mimi-room-policy), and changes by AppDataUpdate proposals.
 //!
-//! What a component's value means is the caller's. A commit carries each change as an update payload; every member,
-//! the committer included, computes the component's value after it with the same [`Resolve`] function the caller
-//! gives, so all of them arrive at the same dictionary. A member whose computation differs gets a different GroupContext,
-//! and openmls refuses the commit on its confirmation tag.
+//! What a component's value means is the caller's. A commit carries each change as an update payload or a removal;
+//! every member, the committer included, computes the component's value after it with the same [`Resolve`] function
+//! the caller gives, so all of them arrive at the same dictionary. A member whose computation differs gets a different
+//! GroupContext, and openmls refuses the commit on its confirmation tag.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::mem;
 
 use openmls::component::ComponentData;
@@ -21,9 +21,60 @@ use super::{member_index, validated_key_package};
 use crate::mls::pending::{open_group, staged, PendingCommit, WelcomeForm};
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
 
-/// The value a component takes after an update: given the component, its value before (none when absent) and the
-/// update's payload. An error refuses the commit.
-pub type Resolve<'a> = &'a dyn Fn(u16, Option<&[u8]>, &[u8]) -> anyhow::Result<Vec<u8>>;
+/// One change to a component that a commit carries.
+#[derive(Clone, Copy, Debug)]
+pub enum Change<'a> {
+    /// An update, with its payload.
+    Update(&'a [u8]),
+    /// The component's removal.
+    Remove,
+}
+
+/// The value a component has after a change: given the component, its value before (none when absent) and the change.
+/// An update gives a value and a removal gives none; an error refuses the commit. A commit changing one component
+/// several times resolves each change in commit order, from the value the one before it gave.
+///
+/// It is not told who proposed the change. The room's hub is where a room's policy on who may change what is enforced
+/// (draft-ietf-mimi-protocol); these rules say what a change does to the value, and whether it can apply at all.
+pub type Resolve<'a> =
+    &'a dyn Fn(u16, Option<&[u8]>, Change<'_>) -> anyhow::Result<Option<Vec<u8>>>;
+
+/// The dictionary changes `operations` make, in order, each resolved from the value the one before it left.
+fn resolve_changes(
+    mut updater: AppDataDictionaryUpdater<'_>,
+    operations: Vec<(u16, AppDataUpdateOperation)>,
+    resolve: Resolve<'_>,
+) -> anyhow::Result<Option<AppDataUpdates>> {
+    let mut values: BTreeMap<u16, Option<Vec<u8>>> = BTreeMap::new();
+    for (component, operation) in &operations {
+        let before = values.get(component).map_or_else(
+            || updater.old_value(*component).map(<[u8]>::to_vec),
+            Clone::clone,
+        );
+        let change = match operation {
+            AppDataUpdateOperation::Update(update) => Change::Update(update.as_slice()),
+            AppDataUpdateOperation::Remove => Change::Remove,
+        };
+        let after = resolve(*component, before.as_deref(), change)?;
+        match (change, &after) {
+            (Change::Update(_), None) => {
+                anyhow::bail!("an update to component {component} resolved to no value")
+            }
+            (Change::Remove, Some(_)) => {
+                anyhow::bail!("a removal of component {component} resolved to a value")
+            }
+            _ => {}
+        }
+        values.insert(*component, after);
+    }
+    for (component, value) in values {
+        match value {
+            Some(value) => updater.set(ComponentData::from_parts(component, value.into())),
+            None => updater.remove(&component),
+        }
+    }
+    Ok(updater.changes())
+}
 
 /// What a leaf of a MIMI room advertises: the generation suite only (INV-MLS-002), the app data dictionary, the
 /// AppDataUpdate proposal and basic credentials.
@@ -140,11 +191,6 @@ pub fn mimi_commit_app_data_pending(
         key_packages.len() <= crate::mls::groups::MAX_BULK_MEMBERS,
         "the commit adds more members than one commit may"
     );
-    let components: BTreeSet<u16> = updates.iter().map(|(component, _)| *component).collect();
-    anyhow::ensure!(
-        components.len() == updates.len(),
-        "a component is updated twice in one commit"
-    );
     let mut opened = open_group(group_state_bytes, bundle_bytes)?;
     let adds = key_packages
         .iter()
@@ -169,28 +215,13 @@ pub fn mimi_commit_app_data_pending(
         .propose_removals(leaves)
         .load_psks(opened.provider.storage())
         .map_err(|e| anyhow::anyhow!("Error loading psks: {:?}", e))?;
-    // Every AppDataUpdate the commit covers: those other members proposed (a leave), included by reference, and this
-    // commit's own. One operation per component, so committer and receivers apply them in the same order.
+    // Every AppDataUpdate the commit covers: those other members proposed (a leave), included by reference, then this
+    // commit's own, sorted by component and otherwise in the commit's order, the order receivers resolve them in.
     let operations: Vec<(u16, AppDataUpdateOperation)> = stage
         .app_data_update_proposals()
         .map(|proposal| (proposal.component_id(), proposal.operation().clone()))
         .collect();
-    let touched: BTreeSet<u16> = operations.iter().map(|(component, _)| *component).collect();
-    anyhow::ensure!(
-        touched.len() == operations.len(),
-        "the commit would change a component more than once; commit the pending change first"
-    );
-    let mut values = stage.app_data_dictionary_updater();
-    for (component, operation) in &operations {
-        match operation {
-            AppDataUpdateOperation::Remove => values.remove(component),
-            AppDataUpdateOperation::Update(update) => {
-                let value = resolve(*component, values.old_value(*component), update.as_slice())?;
-                values.set(ComponentData::from_parts(*component, value.into()));
-            }
-        }
-    }
-    let changes = values.changes();
+    let changes = resolve_changes(stage.app_data_dictionary_updater(), operations, resolve)?;
     stage.with_app_data_dictionary_updates(changes);
     let (commit, welcome, _group_info) = stage
         .build(
@@ -256,9 +287,10 @@ pub fn mimi_leave_app_data(
     Ok((crate::mls::zeroizing_json(&state)?.to_vec(), proposals))
 }
 
-/// Take another member's proposal to a MIMI room for the room's next commit: the group state holding it. Only a
-/// member's Remove or AppDataUpdate is taken, the proposals a leave sends; anything else is refused, so a commit that
-/// includes the stored proposals carries nothing this member did not vet.
+/// Take another member's proposal to a MIMI room for the room's next commit: the group state holding it. Only the
+/// proposals a leave sends are taken: a member's Remove of its own leaf, and its AppDataUpdate that updates a
+/// component. Anything else is refused, a Remove of another member and a component's removal included, so a commit
+/// that includes the stored proposals carries nothing this member did not vet.
 pub fn mimi_process_proposal_app_data(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
@@ -286,17 +318,20 @@ pub fn mimi_process_proposal_app_data(
     let ProcessedMessageContent::ProposalMessage(queued) = processed.into_content() else {
         anyhow::bail!("Expected a proposal");
     };
-    anyhow::ensure!(
-        matches!(queued.sender(), Sender::Member(_)),
-        "a room's proposals are taken only from its members"
-    );
-    anyhow::ensure!(
-        matches!(
-            queued.proposal(),
-            Proposal::Remove(_) | Proposal::AppDataUpdate(_)
+    let Sender::Member(sender) = *queued.sender() else {
+        anyhow::bail!("a room's proposals are taken only from its members");
+    };
+    match queued.proposal() {
+        Proposal::Remove(remove) => anyhow::ensure!(
+            remove.removed() == sender,
+            "a member's Remove is taken only for its own leaf"
         ),
-        "only a member's Remove or AppDataUpdate is taken for the next commit"
-    );
+        Proposal::AppDataUpdate(update) => anyhow::ensure!(
+            matches!(update.operation(), AppDataUpdateOperation::Update(_)),
+            "a member's AppDataUpdate is taken only when it updates a component"
+        ),
+        _ => anyhow::bail!("only a member's Remove or AppDataUpdate is taken for the next commit"),
+    }
     group
         .store_pending_proposal(provider.storage(), *queued)
         .map_err(|e| anyhow::anyhow!("Error storing the proposal: {:?}", e))?;
@@ -315,8 +350,8 @@ pub fn mimi_process_proposal_app_data(
 }
 
 /// Take another member's commit to a MIMI room: the group state after it, and the member openmls authenticated as its
-/// sender. Each AppDataUpdate it carries sets its component to the value `resolve` computes; a commit whose values
-/// differ from that is refused, and so is one `resolve` refuses. On a refusal the given state stays the current one.
+/// sender. Each AppDataUpdate it carries, an update or a removal, sets its component to what `resolve` computes; a
+/// commit whose values differ from that is refused, and so is one `resolve` refuses. On a refusal the given state stays the current one.
 pub fn mimi_process_commit_app_data(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
@@ -347,19 +382,13 @@ pub fn mimi_process_commit_app_data(
     let staged_commit = match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged_commit) => *staged_commit,
         ProcessedMessageContent::UnresolvedAppDataCommit(unresolved) => {
-            let mut updater = group.app_data_dictionary_updater();
-            for proposal in unresolved.app_data_update_proposals() {
-                let component = proposal.component_id();
-                match proposal.operation() {
-                    AppDataUpdateOperation::Remove => updater.remove(&component),
-                    AppDataUpdateOperation::Update(update) => {
-                        let value =
-                            resolve(component, updater.old_value(component), update.as_slice())?;
-                        updater.set(ComponentData::from_parts(component, value.into()));
-                    }
-                }
-            }
-            let changes = updater.changes();
+            // Sorted by component and otherwise in the commit's order.
+            let operations: Vec<(u16, AppDataUpdateOperation)> = unresolved
+                .app_data_update_proposals()
+                .map(|proposal| (proposal.component_id(), proposal.operation().clone()))
+                .collect();
+            let changes =
+                resolve_changes(group.app_data_dictionary_updater(), operations, resolve)?;
             group
                 .stage_app_data_commit(&provider, *unresolved, changes)
                 .map_err(|e| anyhow::anyhow!("the commit's app data does not apply: {:?}", e))?

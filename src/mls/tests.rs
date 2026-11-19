@@ -1110,15 +1110,15 @@ fn a_consumed_keypackage_cannot_open_a_second_welcome() {
     );
 }
 
-/// Build an `IdentityBundle` whose KeyPackage carries the last-resort extension. A last-resort
-/// KeyPackage is the RFC 9420 §16.8 exception to single-use: it may open more than one Welcome, so
-/// `process_welcome` must NOT retire it. Test-only.
 /// The extension openmls marks a last-resort KeyPackage with in this build.
 #[cfg(not(feature = "mimi-app-data"))]
 const LAST_RESORT_CARRIER: ExtensionType = ExtensionType::LastResort;
 #[cfg(feature = "mimi-app-data")]
 const LAST_RESORT_CARRIER: ExtensionType = ExtensionType::AppDataDictionary;
 
+/// Build an `IdentityBundle` whose KeyPackage carries the last-resort marker. A last-resort
+/// KeyPackage is the RFC 9420 §16.8 exception to single-use: it may open more than one Welcome, so
+/// `process_welcome` must NOT retire it. Test-only.
 fn last_resort_identity(user_id: &str, now: i64) -> (Vec<u8>, Vec<u8>) {
     use openmls::ciphersuite::signature::SignaturePublicKey;
     use openmls::credentials::{BasicCredential, CredentialWithKey};
