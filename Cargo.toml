@@ -25,9 +25,9 @@ crate-type = ["rlib"]
 anyhow = "1.0.100"
 getrandom = { version = "0.2", features = ["js"] }
 hex = "0.4.3"
-openmls = { git = "https://github.com/openmls/openmls", rev = "28369d5b48608bef4ddf8371d91503b0f3852bb3", features = ["js"] }
-openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "28369d5b48608bef4ddf8371d91503b0f3852bb3" }
-openmls_traits = { git = "https://github.com/openmls/openmls", rev = "28369d5b48608bef4ddf8371d91503b0f3852bb3" }
+openmls = { git = "https://github.com/openmls/openmls", rev = "ba267737b9511e538a77a41f4480fbed28ff4e83", features = ["js"] }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "ba267737b9511e538a77a41f4480fbed28ff4e83" }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "ba267737b9511e538a77a41f4480fbed28ff4e83" }
 serde = "1.0.228"
 serde_json = "1.0.149"
 postcard = { version = "1", default-features = false, features = ["alloc"] }

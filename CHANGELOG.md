@@ -3,6 +3,11 @@
 This crate uses 0.x semantic versions: a minor version changes the public API or a wire format, a patch changes
 anything else. There is no API-stability guarantee before 1.0 (see the README).
 
+## Unreleased
+
+- openmls moves to its main branch as of 2026-11-18, the commit `Cargo.toml` pins. Commits list their Update, Remove and SelfRemove
+  proposals in ascending leaf order; the other changes are in features this crate does not enable.
+
 ## 0.1.0 - 2026-11-15
 
 First release of the cryptographic core of Haven's client, native and WASM, as in production use today.
