@@ -96,7 +96,8 @@ struct RetentionConfig {
     max_past_epochs: usize,
 }
 
-struct InspectionProvider(OpenMlsRustCrypto);
+/// A scratch provider whose storage is wiped when dropped, for reading a group without keeping a copy of its state.
+pub(crate) struct InspectionProvider(pub(crate) OpenMlsRustCrypto);
 
 impl Drop for InspectionProvider {
     fn drop(&mut self) {

@@ -45,6 +45,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(feature = "mimi-app-data")]
 pub mod app_data;
+pub mod view;
 
 use crate::mls::pending::{open_group, staged, OpenedGroup, PendingCommit, WelcomeForm};
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
@@ -876,6 +877,24 @@ pub fn mls_process_commit_appsync_with(
     commit_bytes: Vec<u8>,
     lifetimes: crate::mls::JoinLifetimes,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, crate::mls::AuthenticatedSender)> {
+    let (state, roster, sender, _) =
+        mimi_process_commit_summarized(group_state_bytes, bundle_bytes, commit_bytes, lifetimes)?;
+    Ok((state, roster, sender))
+}
+
+/// [`mls_process_commit_appsync_with`], also returning what the Commit did ([`view::MimiCommitSummary`]): the epoch
+/// it moved the group to, its committer, its proposals by type and whether it carried a path.
+pub fn mimi_process_commit_summarized(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    commit_bytes: Vec<u8>,
+    lifetimes: crate::mls::JoinLifetimes,
+) -> anyhow::Result<(
+    Vec<u8>,
+    Vec<u8>,
+    crate::mls::AuthenticatedSender,
+    view::MimiCommitSummary,
+)> {
     // Wrap on entry (see crate::mls::groups::mls_process_commit's comment on the
     // unused-but-still-owned bundle_bytes pattern).
     let group_state_bytes = Zeroizing::new(group_state_bytes);
@@ -906,8 +925,9 @@ pub fn mls_process_commit_appsync_with(
     // decided against, so it is the verified leaf key rather than any identity the payload claims.
     let sender = crate::mls::authenticated_sender(&group, &processed)?;
     let mut roster_payload: Vec<u8> = Vec::new();
-    match processed.into_content() {
+    let summary = match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged) => {
+            let summary = view::commit_summary(&staged, sender.leaf_index);
             // Surface the mimiParticipantList custom proposal payload (if present) BEFORE merging.
             for qp in staged.queued_proposals() {
                 if let Proposal::Custom(c) = qp.proposal() {
@@ -920,13 +940,14 @@ pub fn mls_process_commit_appsync_with(
             group
                 .merge_staged_commit(&provider, *staged)
                 .map_err(|e| anyhow::Error::new(crate::mls::CommitRefusal::merging(&e)))?;
+            summary
         }
         _ => {
             return Err(anyhow::anyhow!(
                 "Expected a Commit, got a different message type"
             ))
         }
-    }
+    };
 
     let new_storage_map = {
         let values = provider.storage().values.read().unwrap();
@@ -940,6 +961,7 @@ pub fn mls_process_commit_appsync_with(
         crate::mls::zeroizing_json(&new_state)?.to_vec(),
         roster_payload,
         sender,
+        summary,
     ))
 }
 
