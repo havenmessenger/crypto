@@ -107,6 +107,20 @@ pub fn mimi_generate_identity_app_data(
     )
 }
 
+/// A fresh KeyPackage for an identity made by [`mimi_generate_identity_app_data`], once its last one opened a Welcome or
+/// nears its lifetime's end: the same credential and signing key, and a leaf that again advertises
+/// [`mimi_app_data_capabilities`], so a room that requires them can still add it.
+pub fn mimi_regenerate_key_package_app_data(
+    bundle_bytes: Vec<u8>,
+    now_secs: i64,
+) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+    crate::mls::groups::regenerate_key_package_with_capabilities(
+        bundle_bytes,
+        now_secs,
+        Some(mimi_app_data_capabilities()),
+    )
+}
+
 /// A new MIMI room's group, with `components` (id, value) as its app data dictionary. Every member must support the
 /// dictionary and AppDataUpdate (the group requires them), and handshake messages are PublicMessage-framed so the room's
 /// hub, never a member, can read them (draft-ietf-mimi-protocol §5.3).

@@ -501,3 +501,28 @@ fn a_commit_removing_a_component_is_judged_by_the_receivers_rules() {
         .expect("rules that allow the removal take the commit");
     assert_eq!(mimi_app_data_value(&alice_state, LIST).unwrap(), None);
 }
+
+/// A member whose KeyPackage opened a Welcome refreshes it, and a room requiring the app data capabilities still adds
+/// it. Revert check: refresh without the capabilities and the add is refused.
+#[test]
+fn a_refreshed_key_package_can_still_join_a_room() {
+    let (alice_state, alice, _, _) = room_with_bob();
+    let (_, carol) = identity("carol");
+    let mut spent: crate::mls::IdentityBundle = serde_json::from_slice(&carol).unwrap();
+    spent.key_package_bundle = None;
+    let (_, carol_kp, _) =
+        mimi_regenerate_key_package_app_data(serde_json::to_vec(&spent).unwrap(), now_secs() + 1)
+            .unwrap();
+    mimi_commit_app_data_pending(
+        alice_state,
+        alice,
+        vec![carol_kp],
+        Vec::new(),
+        vec![(LIST, b"carol".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .expect(
+        "PLANT-APP-DATA-REFRESH: the refreshed KeyPackage meets the room's required capabilities",
+    );
+}
