@@ -743,3 +743,44 @@ fn a_refresh_refuses_a_bundle_holding_added_key_packages() {
         "PLANT-MIMI-KP-REFRESH-REFUSED: a refresh would drop KeyPackages still published"
     );
 }
+
+/// The summarized form of taking a commit says what it did: the epoch it moved the group to, its committer, an Add and
+/// an AppDataUpdate among its proposals. The group's view lists the participant list among its components. Revert
+/// check: report the epoch before the commit, and the summary disagrees with the view.
+#[test]
+fn a_summarized_commit_says_what_it_did() {
+    let (alice_state, alice, bob_state, _) = room_with_bob();
+    let (carol_kp, _) = identity("carol");
+    let pending = mimi_commit_app_data_pending(
+        alice_state,
+        alice,
+        vec![carol_kp],
+        Vec::new(),
+        vec![(LIST, b"carol".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .unwrap();
+    let commit = pending.commit().to_vec();
+    let (bob_state, sender, summary) =
+        mimi_process_commit_app_data_summarized(bob_state, identity("bob").1, commit, &append)
+            .unwrap();
+    let view = crate::mimi::view::mimi_group_view(&bob_state).unwrap();
+    assert_eq!(
+        summary.epoch, view.epoch,
+        "PLANT-COMMIT-SUMMARY-EPOCH: the summary's epoch is not the group's after the commit"
+    );
+    assert_eq!(summary.committer_leaf, sender.leaf_index);
+    assert_eq!(summary.committer_leaf, 0, "Alice, the creator");
+    assert!(
+        summary.proposal_types.contains(&0x0001),
+        "{:?}",
+        summary.proposal_types
+    );
+    assert!(
+        summary.proposal_types.len() >= 2,
+        "the Add and the AppDataUpdate: {:?}",
+        summary.proposal_types
+    );
+    assert!(view.components.contains(&LIST), "{:?}", view.components);
+}

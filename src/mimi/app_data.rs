@@ -507,6 +507,27 @@ pub fn mimi_process_commit_app_data(
     commit_bytes: Vec<u8>,
     resolve: Resolve<'_>,
 ) -> anyhow::Result<(Vec<u8>, crate::mls::AuthenticatedSender)> {
+    let (state, sender, _) = mimi_process_commit_app_data_summarized(
+        group_state_bytes,
+        bundle_bytes,
+        commit_bytes,
+        resolve,
+    )?;
+    Ok((state, sender))
+}
+
+/// [`mimi_process_commit_app_data`], also returning what the commit did ([`super::view::MimiCommitSummary`]): the
+/// epoch it moved the group to, its committer, its proposals by type and whether it carried a path.
+pub fn mimi_process_commit_app_data_summarized(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    commit_bytes: Vec<u8>,
+    resolve: Resolve<'_>,
+) -> anyhow::Result<(
+    Vec<u8>,
+    crate::mls::AuthenticatedSender,
+    super::view::MimiCommitSummary,
+)> {
     let group_state_bytes = Zeroizing::new(group_state_bytes);
     let _bundle_bytes = Zeroizing::new(bundle_bytes);
     let mut state: GroupState = serde_json::from_slice(&group_state_bytes)
@@ -544,6 +565,7 @@ pub fn mimi_process_commit_app_data(
         }
         _ => anyhow::bail!("Expected a Commit, got a different message type"),
     };
+    let summary = super::view::commit_summary(&staged_commit, sender.leaf_index);
     group
         .merge_staged_commit(&provider, staged_commit)
         .map_err(|e| anyhow::Error::new(crate::mls::CommitRefusal::merging(&e)))?;
@@ -558,7 +580,11 @@ pub fn mimi_process_commit_app_data(
             .into_iter()
             .collect(),
     };
-    Ok((crate::mls::zeroizing_json(&new_state)?.to_vec(), sender))
+    Ok((
+        crate::mls::zeroizing_json(&new_state)?.to_vec(),
+        sender,
+        summary,
+    ))
 }
 
 /// A component's value in the group `group_state_bytes` holds, read from its GroupContext; none when absent.

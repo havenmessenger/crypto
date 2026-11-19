@@ -8,8 +8,8 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 - Read-only views for the MIMI lane (`mimi::view`): a group as its member's state has it (epoch, suite, own leaf, each
   leaf's identity, credential type and lifetime, GroupContext extensions and app data components), a KeyPackage as
   published (suite, lifetime, extensions, capabilities, last-resort mark, after validation), and a processed Commit
-  (`mimi_process_commit_summarized`: the epoch it moved to, its committer, its proposals by type and whether it
-  carried a path). No view has a field that can hold key material, and reading one changes no state.
+  (`mimi_process_commit_summarized`, and `mimi_process_commit_app_data_summarized` under `mimi-app-data`: the epoch it
+  moved to, its committer, its proposals by type and whether it carried a path). No view has a field that can hold key material, and reading one changes no state.
 - A feature, `mimi-app-data` (off by default), for MIMI rooms whose state lives in the GroupContext's app data dictionary
   and changes by AppDataUpdate proposals (draft-ietf-mls-extensions §4.6-4.7, draft-ietf-mimi-room-policy): identities
   and groups that support it, a staged commit that adds and removes members with AppDataUpdates, processing such a
