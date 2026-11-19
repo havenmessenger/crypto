@@ -30,42 +30,54 @@ pub enum Change<'a> {
     Remove,
 }
 
-/// The value a component has after a change: given the component, its value before (none when absent) and the change.
-/// An update gives a value and a removal gives none; an error refuses the commit. A commit changing one component
-/// several times resolves each change in commit order, from the value the one before it gave.
+/// The value a component has after a commit's changes to it: given the component, its value before the commit (none
+/// when absent) and every change the commit makes to it, in the commit's order. Updates give a value; a removal, which
+/// is a component's only change when it has one, gives none. An error refuses the commit. This is the hand-off
+/// draft-ietf-mls-extensions §4.7 describes: what a component's updates mean together is the component's to define.
 ///
-/// It is not told who proposed the change. The room's hub is where a room's policy on who may change what is enforced
-/// (draft-ietf-mimi-protocol); these rules say what a change does to the value, and whether it can apply at all.
+/// It is not told who proposed a change. The room's hub is where a room's policy on who may change what is enforced
+/// (draft-ietf-mimi-protocol); these rules say what the changes do to the value, and whether they can apply at all.
 pub type Resolve<'a> =
-    &'a dyn Fn(u16, Option<&[u8]>, Change<'_>) -> anyhow::Result<Option<Vec<u8>>>;
+    &'a dyn Fn(u16, Option<&[u8]>, &[Change<'_>]) -> anyhow::Result<Option<Vec<u8>>>;
 
-/// The dictionary changes `operations` make, in order, each resolved from the value the one before it left.
+/// The dictionary changes `operations` make: each component's changes, in the commit's order, resolved together from
+/// its value before the commit.
 fn resolve_changes(
     mut updater: AppDataDictionaryUpdater<'_>,
-    operations: Vec<(u16, AppDataUpdateOperation)>,
+    operations: &[(u16, AppDataUpdateOperation)],
     resolve: Resolve<'_>,
 ) -> anyhow::Result<Option<AppDataUpdates>> {
-    let mut values: BTreeMap<u16, Option<Vec<u8>>> = BTreeMap::new();
-    for (component, operation) in &operations {
-        let before = values.get(component).map_or_else(
-            || updater.old_value(*component).map(<[u8]>::to_vec),
-            Clone::clone,
+    let mut by_component: BTreeMap<u16, Vec<Change<'_>>> = BTreeMap::new();
+    for (component, operation) in operations {
+        by_component
+            .entry(*component)
+            .or_default()
+            .push(match operation {
+                AppDataUpdateOperation::Update(update) => Change::Update(update.as_slice()),
+                AppDataUpdateOperation::Remove => Change::Remove,
+            });
+    }
+    let mut values = Vec::with_capacity(by_component.len());
+    for (component, changes) in &by_component {
+        let removal = changes
+            .iter()
+            .any(|change| matches!(change, Change::Remove));
+        anyhow::ensure!(
+            !removal || changes.len() == 1,
+            "component {component} is both removed and changed in one commit"
         );
-        let change = match operation {
-            AppDataUpdateOperation::Update(update) => Change::Update(update.as_slice()),
-            AppDataUpdateOperation::Remove => Change::Remove,
-        };
-        let after = resolve(*component, before.as_deref(), change)?;
-        match (change, &after) {
-            (Change::Update(_), None) => {
-                anyhow::bail!("an update to component {component} resolved to no value")
-            }
-            (Change::Remove, Some(_)) => {
-                anyhow::bail!("a removal of component {component} resolved to a value")
-            }
-            _ => {}
-        }
-        values.insert(*component, after);
+        let after = resolve(*component, updater.old_value(*component), changes)?;
+        anyhow::ensure!(
+            removal == after.is_none(),
+            "component {component} resolved to {} after {}",
+            if after.is_some() {
+                "a value"
+            } else {
+                "no value"
+            },
+            if removal { "its removal" } else { "an update" }
+        );
+        values.push((*component, after));
     }
     for (component, value) in values {
         match value {
@@ -235,7 +247,7 @@ pub fn mimi_commit_app_data_pending(
         .app_data_update_proposals()
         .map(|proposal| (proposal.component_id(), proposal.operation().clone()))
         .collect();
-    let changes = resolve_changes(stage.app_data_dictionary_updater(), operations, resolve)?;
+    let changes = resolve_changes(stage.app_data_dictionary_updater(), &operations, resolve)?;
     stage.with_app_data_dictionary_updates(changes);
     let (commit, welcome, _group_info) = stage
         .build(
@@ -402,7 +414,7 @@ pub fn mimi_process_commit_app_data(
                 .map(|proposal| (proposal.component_id(), proposal.operation().clone()))
                 .collect();
             let changes =
-                resolve_changes(group.app_data_dictionary_updater(), operations, resolve)?;
+                resolve_changes(group.app_data_dictionary_updater(), &operations, resolve)?;
             group
                 .stage_app_data_commit(&provider, *unresolved, changes)
                 .map_err(|e| anyhow::anyhow!("the commit's app data does not apply: {:?}", e))?

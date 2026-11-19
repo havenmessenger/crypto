@@ -16,32 +16,44 @@ fn now_secs() -> i64 {
     .unwrap()
 }
 
-/// A stand-in for the participant list's rules: the value is the names, comma separated, an update appends one, and
-/// a removal is allowed.
-fn append(_: u16, before: Option<&[u8]>, change: Change<'_>) -> anyhow::Result<Option<Vec<u8>>> {
-    let Change::Update(update) = change else {
-        return Ok(None);
-    };
-    anyhow::ensure!(!update.contains(&b','), "a name has no comma");
-    Ok(Some(match before {
-        Some(list) if !list.is_empty() => [list, b",", update].concat(),
-        _ => update.to_vec(),
-    }))
+/// A stand-in for the participant list's rules: the value is the names, comma separated, each update appends one in
+/// the commit's order, and a removal is allowed.
+fn append(
+    _: u16,
+    before: Option<&[u8]>,
+    changes: &[Change<'_>],
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut value = before.map(<[u8]>::to_vec);
+    for change in changes {
+        let Change::Update(update) = change else {
+            return Ok(None);
+        };
+        anyhow::ensure!(!update.contains(&b','), "a name has no comma");
+        value = Some(match value {
+            Some(list) if !list.is_empty() => [list.as_slice(), b",", update].concat(),
+            _ => update.to_vec(),
+        });
+    }
+    Ok(value)
 }
 
 /// A member whose rules differ: it appends with a semicolon.
 fn append_differently(
     _: u16,
     before: Option<&[u8]>,
-    change: Change<'_>,
+    changes: &[Change<'_>],
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let Change::Update(update) = change else {
-        return Ok(None);
-    };
-    Ok(Some([before.unwrap_or_default(), b";", update].concat()))
+    let mut value = before.unwrap_or_default().to_vec();
+    for change in changes {
+        let Change::Update(update) = change else {
+            return Ok(None);
+        };
+        value = [value.as_slice(), b";", update].concat();
+    }
+    Ok(Some(value))
 }
 
-fn refuse(_: u16, _: Option<&[u8]>, _: Change<'_>) -> anyhow::Result<Option<Vec<u8>>> {
+fn refuse(_: u16, _: Option<&[u8]>, _: &[Change<'_>]) -> anyhow::Result<Option<Vec<u8>>> {
     anyhow::bail!("this member's rules refuse the change")
 }
 
@@ -368,7 +380,7 @@ fn a_pending_leave_and_the_commits_own_update_to_the_list_both_apply() {
 }
 
 /// Bob and Carol leave together and Alice commits both leaves; Dave, who stored them in the other order, takes the
-/// commit. Revert check: resolve every update from the value before the commit, and one leave is lost from the list.
+/// commit. Revert check: hand the rules only a component's last change, and one leave is lost from the list.
 #[test]
 fn two_members_leaving_together_are_committed_in_one_commit() {
     let mut members = room(&["alice", "bob", "carol", "dave"]).into_iter();
@@ -412,7 +424,7 @@ fn two_members_leaving_together_are_committed_in_one_commit() {
     assert!(
         value.split(',').filter(|name| *name == "-bob").count() == 1
             && value.split(',').filter(|name| *name == "-carol").count() == 1,
-        "PLANT-APP-DATA-RUNNING: each leave's update applies once, got {value}"
+        "PLANT-APP-DATA-ALL-CHANGES: each leave's update applies once, got {value}"
     );
     let (dave_state, _) = mimi_process_commit_app_data(dave.state, dave.bundle, commit, &append)
         .expect("Dave resolves the leaves in the commit's order");
