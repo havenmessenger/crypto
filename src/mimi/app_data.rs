@@ -122,12 +122,24 @@ pub fn mimi_generate_identity_app_data(
 /// A fresh KeyPackage for an identity made by [`mimi_generate_identity_app_data`], once its last one opened a Welcome or
 /// nears its lifetime's end: the same credential and signing key, and a leaf that again advertises
 /// [`mimi_app_data_capabilities`], so a room that requires them can still add it.
+///
+/// It replaces the bundle's storage with the new KeyPackage's alone, so it refuses a bundle holding KeyPackages added
+/// by [`mimi_add_key_packages`]: their provider may still hand them out, and a Welcome naming one would then find
+/// nothing to open. Such an identity adds more instead.
 pub fn mimi_regenerate_key_package_app_data(
     bundle_bytes: Vec<u8>,
     now_secs: i64,
 ) -> anyhow::Result<(String, Vec<u8>, Vec<u8>)> {
+    let bundle_bytes = Zeroizing::new(bundle_bytes);
+    let identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+        .map_err(|e| anyhow::anyhow!("Invalid bundle: {:?}", e))?;
+    anyhow::ensure!(
+        identity.key_package_bundles.is_empty(),
+        "the bundle holds KeyPackages its provider may still hand out; add more instead of replacing them"
+    );
+    drop(identity);
     crate::mls::groups::regenerate_key_package_with_capabilities(
-        bundle_bytes,
+        bundle_bytes.to_vec(),
         now_secs,
         Some(mimi_app_data_capabilities()),
     )

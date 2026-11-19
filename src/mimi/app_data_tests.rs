@@ -731,3 +731,15 @@ fn the_bundle_persisted_before_a_join_drops_only_the_named_key_package() {
     assert!(keys.contains(&storage_key_of(&key_packages[0])));
     assert!(keys.contains(&storage_key_of(&key_packages[1])));
 }
+
+/// Refreshing replaces a bundle's storage, so a bundle holding added KeyPackages is refused rather than losing ones its
+/// provider may still hand out. Revert check: let refresh run, and the added KeyPackages are gone from the bundle.
+#[test]
+fn a_refresh_refuses_a_bundle_holding_added_key_packages() {
+    let (_, bob) = identity("bob");
+    let (bob, _) = mimi_add_key_packages(bob, 2, false, now_secs()).unwrap();
+    assert!(
+        mimi_regenerate_key_package_app_data(bob, now_secs()).is_err(),
+        "PLANT-MIMI-KP-REFRESH-REFUSED: a refresh would drop KeyPackages still published"
+    );
+}
