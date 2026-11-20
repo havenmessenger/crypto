@@ -148,9 +148,12 @@ fn a_new_bundle_for_another_user_or_scheme_is_refused() {
 fn a_rotation_to_the_leafs_current_key_is_refused() {
     let (alice_state, alice_bundle, _, _) = alice_and_bob();
     let refused = rotate_signer_pending(alice_state, alice_bundle.clone(), alice_bundle);
+    let error = refused
+        .err()
+        .expect("PLANT-H3-SAME-KEY: a rotation to the leaf's current key was staged");
     assert!(
-        refused.is_err(),
-        "PLANT-H3-SAME-KEY: a rotation to the leaf's current key was staged"
+        error.to_string().contains("already holds"),
+        "refused by the same-key check, not an earlier one: {error}"
     );
 }
 
@@ -168,9 +171,14 @@ fn a_new_bundle_whose_key_pair_does_not_match_is_refused() {
     let mismatched = serde_json::to_vec(&mismatched).unwrap();
 
     let refused = rotate_signer_pending(alice_state, alice_bundle, mismatched);
+    let error = refused.err().expect(
+        "PLANT-H3-PROBE: a bundle whose private key does not sign for its public key was staged",
+    );
     assert!(
-        refused.is_err(),
-        "PLANT-H3-PROBE: a bundle whose private key does not sign for its public key was staged"
+        error
+            .to_string()
+            .contains("does not sign for its public key"),
+        "refused by the probe, not an earlier check: {error}"
     );
 }
 
