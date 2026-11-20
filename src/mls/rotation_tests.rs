@@ -5,7 +5,7 @@
 use openmls::prelude::*;
 use tls_codec::Serialize as _;
 
-use super::rotate_signer_pending;
+use super::{leaf_uses_bundle, rotate_signer_pending};
 use crate::identity::generate_identity;
 use crate::mls::groups::{
     add_member, create_group, decrypt_message, encrypt_message, mls_process_commit, process_welcome,
@@ -138,5 +138,30 @@ fn a_new_bundle_for_another_user_or_scheme_is_refused() {
     assert!(
         rotate_signer_pending(alice_state, alice_bundle, other_scheme).is_err(),
         "a bundle with another signature scheme"
+    );
+}
+
+/// The group state tells which key the member's leaf carries: the current bundle's before a rotation, the new one's
+/// after it is installed, and never both. Revert check: answer true for any bundle, and the old bundle still matches
+/// after the rotation.
+#[test]
+fn the_group_state_tells_whether_the_leaf_was_rotated() {
+    let (alice_state, alice_bundle, _, _) = alice_and_bob();
+    let (_, _, new_bundle) = generate_identity("alice".into(), now()).unwrap();
+    assert!(leaf_uses_bundle(alice_state.clone(), alice_bundle.clone()).unwrap());
+    assert!(
+        !leaf_uses_bundle(alice_state.clone(), new_bundle.clone()).unwrap(),
+        "PLANT-H3-LEAF-KEY: the leaf reads as carrying a key it was never rotated to"
+    );
+
+    let (rotated, _, _) =
+        rotate_signer_pending(alice_state, alice_bundle.clone(), new_bundle.clone())
+            .unwrap()
+            .into_merged()
+            .unwrap();
+    assert!(leaf_uses_bundle(rotated.to_vec(), new_bundle).unwrap());
+    assert!(
+        !leaf_uses_bundle(rotated.to_vec(), alice_bundle).unwrap(),
+        "the rotated leaf no longer carries the old key"
     );
 }

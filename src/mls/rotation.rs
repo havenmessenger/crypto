@@ -82,6 +82,22 @@ pub fn rotate_signer_pending(
     staged(opened, &commit, None, &[])
 }
 
+/// Whether this member's own leaf in the group already carries `bundle_bytes`' signing key: true once a rotation to
+/// that bundle has been installed, so the caller can tell from the group state alone which groups still need one.
+pub fn leaf_uses_bundle(group_state_bytes: Vec<u8>, bundle_bytes: Vec<u8>) -> anyhow::Result<bool> {
+    let public_key = {
+        let identity: IdentityBundle = serde_json::from_slice(&bundle_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid bundle: {e:?}"))?;
+        identity.public_key_bytes.clone()
+    };
+    let opened = open_group(group_state_bytes, bundle_bytes)?;
+    let leaf = opened
+        .group
+        .own_leaf_node()
+        .ok_or_else(|| anyhow::anyhow!("This member has no leaf in the group"))?;
+    Ok(leaf.signature_key().as_slice() == public_key.as_slice())
+}
+
 #[cfg(test)]
 #[path = "rotation_tests.rs"]
 mod tests;
