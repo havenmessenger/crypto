@@ -1109,7 +1109,3 @@ pub fn mls_extract_signature_key(key_package_bytes: Vec<u8>) -> String {
     let sig_key = validated.leaf_node().signature_key().as_slice();
     hex::encode_upper(sig_key)
 }
-
-#[cfg(test)]
-#[path = "groups_rotation_tests.rs"]
-mod rotation_tests;

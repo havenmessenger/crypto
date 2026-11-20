@@ -13,6 +13,7 @@ pub mod inspection;
 pub mod own_message;
 pub mod pending;
 pub mod processing_error;
+pub mod rotation;
 pub mod store;
 pub mod stored;
 pub mod targeted;
