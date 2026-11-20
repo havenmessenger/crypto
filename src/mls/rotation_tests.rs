@@ -1,6 +1,7 @@
 //! A member replacing its leaf's signing key ([`rotate_signer_pending`]): every other member takes the new key for that
 //! leaf, verifies the member's messages under it, and refuses a message signed with the old key. A new bundle that
-//! names another user, or uses another signature scheme, stages nothing.
+//! names another user, uses another signature scheme, carries the leaf's current key, or holds a private key that
+//! does not sign for its public key, stages nothing.
 
 use openmls::prelude::*;
 use tls_codec::Serialize as _;
@@ -51,8 +52,8 @@ fn alice_and_bob() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
 }
 
 /// Alice rotates to a new bundle's key. Bob holds the new key for her leaf, reads her message under the new bundle,
-/// and refuses one signed with the old key. Revert check: rotate to her current bundle, and Bob still holds the old key
-/// and reads the old-key message.
+/// and refuses one signed with the old key. Revert check: skip the rotation, and Bob still holds the old key and reads
+/// the old-key message.
 #[test]
 fn a_rotated_signing_key_replaces_the_old_one_for_every_member() {
     let (alice_state, alice_bundle, bob_state, bob_bundle) = alice_and_bob();
@@ -138,6 +139,38 @@ fn a_new_bundle_for_another_user_or_scheme_is_refused() {
     assert!(
         rotate_signer_pending(alice_state, alice_bundle, other_scheme).is_err(),
         "a bundle with another signature scheme"
+    );
+}
+
+/// A "rotation" to the key the leaf already holds is refused: it would move the epoch and report success while the
+/// key a lost device holds stays valid. Revert check: drop the refusal, and the rotation stages.
+#[test]
+fn a_rotation_to_the_leafs_current_key_is_refused() {
+    let (alice_state, alice_bundle, _, _) = alice_and_bob();
+    let refused = rotate_signer_pending(alice_state, alice_bundle.clone(), alice_bundle);
+    assert!(
+        refused.is_err(),
+        "PLANT-H3-SAME-KEY: a rotation to the leaf's current key was staged"
+    );
+}
+
+/// A new bundle whose private key does not sign for its public key is refused before staging: every receiver would
+/// verify the new leaf under that public key and refuse the commit. Revert check: drop the probe, and it stages.
+#[test]
+fn a_new_bundle_whose_key_pair_does_not_match_is_refused() {
+    let (alice_state, alice_bundle, _, _) = alice_and_bob();
+    let (_, _, first) = generate_identity("alice".into(), now()).unwrap();
+    let (_, _, second) = generate_identity("alice".into(), now()).unwrap();
+    // The first bundle's public key with the second's private key.
+    let mut mismatched: IdentityBundle = serde_json::from_slice(&first).unwrap();
+    let other: IdentityBundle = serde_json::from_slice(&second).unwrap();
+    mismatched.private_key = other.private_key.clone();
+    let mismatched = serde_json::to_vec(&mismatched).unwrap();
+
+    let refused = rotate_signer_pending(alice_state, alice_bundle, mismatched);
+    assert!(
+        refused.is_err(),
+        "PLANT-H3-PROBE: a bundle whose private key does not sign for its public key was staged"
     );
 }
 

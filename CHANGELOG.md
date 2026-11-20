@@ -9,8 +9,10 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
   with a new bundle's key, so that once the group has processed it every member verifies the member's messages under
   the new key and refuses the old one. The commit is signed with the current key (receivers verify a commit against the
   committer's leaf as it stood); the caller opens the group with the new bundle once the commit is accepted. A new
-  bundle naming another user, or with another signature scheme than the group's, is refused before anything is staged.
-  `leaf_uses_bundle` tells from a group state whether the member's leaf already carries a bundle's signing key.
+  bundle naming another user, with another signature scheme than the group's, carrying the key the leaf already holds,
+  or holding a private key that does not sign for its public key (checked with a probe signature) is refused before
+  anything is staged. `leaf_uses_bundle` tells from a group state whether the member's leaf already carries a bundle's
+  signing key; the bundle's private key is wiped when it returns.
 - Read-only views for the MIMI lane (`mimi::view`): a group as its member's state has it (epoch, suite, own leaf, each
   leaf's identity, credential type and lifetime, GroupContext extensions and app data components), a KeyPackage as
   published (suite, lifetime, extensions, capabilities, last-resort mark; its signature checked, its lifetime shown even
