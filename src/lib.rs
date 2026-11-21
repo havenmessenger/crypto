@@ -4,6 +4,7 @@
 // `flutter_rust_bridge` dependency, no FRB macros, no app-binding types. See Cargo.toml's
 // header for the same invariant restated at the manifest level.
 pub mod crypto;
+mod hpke_provider;
 pub mod identity;
 pub mod mime;
 pub mod mimi;

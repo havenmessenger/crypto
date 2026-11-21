@@ -194,7 +194,8 @@ fn stored_message_is_reproduced_byte_for_byte() {
         key: Zeroizing::new(unhex(&vector["sender"]["signature_private_key"])),
         scheme: suite.signature,
     };
-    hpke::EPHEMERAL_SEED.with(|seed| *seed.borrow_mut() = Some(unhex(&vector["ephemeral_seed"])));
+    crate::hpke_provider::EPHEMERAL_SEED
+        .with(|seed| *seed.borrow_mut() = Some(unhex(&vector["ephemeral_seed"])));
     let sealed = seal(
         &provider,
         &group,
@@ -233,7 +234,7 @@ fn regenerate_stored_message() {
     let application_data = b"operators-only preview: rm -rf ./build".to_vec();
     let padding_len = 5usize;
     let seed = [0x42u8; 32];
-    hpke::EPHEMERAL_SEED.with(|cell| *cell.borrow_mut() = Some(seed.to_vec()));
+    crate::hpke_provider::EPHEMERAL_SEED.with(|cell| *cell.borrow_mut() = Some(seed.to_vec()));
     let sealed = seal(
         &a.provider,
         a.group(),

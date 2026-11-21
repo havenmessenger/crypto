@@ -62,18 +62,12 @@ base64 = "0.22"
 thiserror = "2"
 spake2 = "0.4.0"
 subtle = "2"
-# HPKE PSK mode (RFC 9180 section 5.1.2) is not reachable through openmls's crypto trait, which exposes
-# Base mode only. Pinned exactly, at the release whose test feature lets a sealed message be compared
-# byte for byte with a stored vector; 0.8, which openmls_rust_crypto now builds on, dropped that feature.
-hpke-rs = { version = "=0.7.0", default-features = false, features = ["hazmat", "serialization"] }
-hpke-rs-crypto = "=0.7.0"
-hpke-rs-rust-crypto = "=0.7.0"
-
-[dev-dependencies]
-# Test builds only. They let a test pin the HPKE ephemeral randomness, so a sealed message can be
-# compared byte for byte with a stored vector; a normal build never enables these features.
-hpke-rs = { version = "=0.7.0", default-features = false, features = ["hpke-test", "hpke-test-prng"] }
-hpke-rs-rust-crypto = { version = "=0.7.0", features = ["deterministic-prng"] }
+# HPKE called directly (src/hpke_provider.rs): PSK mode for targeted messages (RFC 9180 section 5.1.2), which
+# openmls's crypto trait does not expose, and DeriveKeyPair for the reader seal. Pinned exactly, at the release
+# openmls_rust_crypto resolves to, so a build links one HPKE stack.
+hpke-rs = { version = "=0.8.0", default-features = false, features = ["hazmat", "serialization"] }
+hpke-rs-crypto = "=0.8.0"
+hpke-rs-rust-crypto = "=0.8.0"
 
 [profile.release]
 lto = "thin"

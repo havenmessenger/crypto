@@ -1,13 +1,13 @@
-//! HPKE in PSK mode (RFC 9180 section 5.1.2), the one place the `hpke-rs` backend is used
-//! directly: openmls's crypto trait exposes Base mode only, and a targeted message needs a PSK.
+//! HPKE in PSK mode (RFC 9180 section 5.1.2): openmls's crypto trait exposes Base mode only, and a
+//! targeted message needs a PSK, so this calls `hpke-rs` directly (see `crate::hpke_provider`).
 //! The KEM, KDF and AEAD come from the group's ciphersuite; nothing here names a suite.
 
 use hpke_rs::{Hpke, HpkePrivateKey, HpkePublicKey, Mode};
 use hpke_rs_crypto::types::{AeadAlgorithm, KdfAlgorithm, KemAlgorithm};
-use hpke_rs_rust_crypto::HpkeRustCrypto;
 use openmls_traits::types::{HpkeAeadType, HpkeKdfType, HpkeKemType};
 use zeroize::Zeroizing;
 
+use crate::hpke_provider::{self, HpkeProvider};
 use crate::suite_policy::TargetedSuite;
 
 #[cfg(test)]
@@ -15,10 +15,6 @@ thread_local! {
     /// Number of times a content decryption was attempted on this thread. Tests read it to prove a
     /// refused message never reached the HPKE open.
     pub(super) static OPEN_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// When set, the HPKE ephemeral randomness of the next seal on this thread, so a test can
-    /// compare the sealed bytes with a stored vector.
-    pub(super) static EPHEMERAL_SEED: std::cell::RefCell<Option<Vec<u8>>> =
-        const { std::cell::RefCell::new(None) };
 }
 
 /// The HPKE step failed. The reason is deliberately not carried: it never reveals key material
@@ -53,13 +49,14 @@ const fn aead(aead: HpkeAeadType) -> Option<AeadAlgorithm> {
     })
 }
 
-fn hpke(suite: &TargetedSuite) -> Option<Hpke<HpkeRustCrypto>> {
-    Some(Hpke::new(
+fn hpke(suite: &TargetedSuite) -> Option<Hpke<HpkeProvider>> {
+    hpke_provider::new(
         Mode::Psk,
         kem(suite.hpke_kem),
         kdf(suite.hpke_kdf),
         aead(suite.hpke_aead)?,
-    ))
+    )
+    .ok()
 }
 
 /// Two-step sender: encapsulate first (`SetupPSKS`), let `aad_for` build the AAD from the
@@ -73,12 +70,8 @@ pub(super) fn seal(
     aad_for: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), HpkeFailure> {
-    let mut hpke = hpke(suite).ok_or(HpkeFailure)?;
-    #[cfg(test)]
-    if let Some(seed) = EPHEMERAL_SEED.with(|seed| seed.borrow_mut().take()) {
-        hpke.seed(&seed).map_err(|_| HpkeFailure)?;
-    }
-    let (kem_output, mut context) = hpke
+    let (kem_output, mut context) = hpke(suite)
+        .ok_or(HpkeFailure)?
         .setup_sender(
             &HpkePublicKey::from(recipient_public_key),
             info,

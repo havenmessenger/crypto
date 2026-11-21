@@ -5,6 +5,10 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- `hpke-rs` 0.8 (from 0.7), the version openmls builds on, so the crate links one HPKE stack. Targeted messages and
+  the reader seal build their HPKE context with `try_new`: if the system's randomness can't be had, the operation is
+  refused with its usual error instead of panicking. Their wire output is unchanged; the stored vectors still match
+  byte for byte.
 - `mls::rotation::rotate_signer_pending`: a member stages one commit that renews its leaf and replaces its signing key
   with a new bundle's key, so that once the group has processed it every member verifies the member's messages under
   the new key and refuses the old one. The commit is signed with the current key (receivers verify a commit against the

@@ -24,11 +24,11 @@
 use hkdf::Hkdf;
 use hpke_rs::{Hpke, HpkePrivateKey, HpkePublicKey, Mode};
 use hpke_rs_crypto::types::{AeadAlgorithm, KdfAlgorithm, KemAlgorithm};
-use hpke_rs_rust_crypto::HpkeRustCrypto;
 use openmls_traits::types::{HpkeAeadType, HpkeKdfType, HpkeKemType};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+use crate::hpke_provider::{self, HpkeProvider};
 use crate::suite_policy::{reader_seal_suite, ReaderSealSuite};
 
 /// The salt of the derivation from a secret and a label to the key material the KEM derives from.
@@ -36,14 +36,6 @@ const DERIVATION_SALT: &[u8] = b"detente reader key v1";
 
 /// Length of an X25519 private key, public key and encapsulated key.
 pub const KEY_LEN: usize = 32;
-
-#[cfg(test)]
-thread_local! {
-    /// When set, the HPKE ephemeral randomness (`ikmE`) of the next seal on this thread, so a test can compare a
-    /// sealed payload with a published vector.
-    pub(crate) static EPHEMERAL_SEED: std::cell::RefCell<Option<Vec<u8>>> =
-        const { std::cell::RefCell::new(None) };
-}
 
 /// Why a seal, an open or a derivation was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -126,7 +118,7 @@ const fn x25519(suite: ReaderSealSuite) -> Result<(), ReaderSealError> {
     }
 }
 
-fn hpke(suite: ReaderSealSuite) -> Result<Hpke<HpkeRustCrypto>, ReaderSealError> {
+fn hpke(suite: ReaderSealSuite) -> Result<Hpke<HpkeProvider>, ReaderSealError> {
     x25519(suite)?;
     let kdf = match suite.hpke_kdf {
         HpkeKdfType::HkdfSha256 => KdfAlgorithm::HkdfSha256,
@@ -139,7 +131,8 @@ fn hpke(suite: ReaderSealSuite) -> Result<Hpke<HpkeRustCrypto>, ReaderSealError>
         HpkeAeadType::ChaCha20Poly1305 => AeadAlgorithm::ChaCha20Poly1305,
         HpkeAeadType::Export => return Err(ReaderSealError::Suite),
     };
-    Ok(Hpke::new(Mode::Base, KemAlgorithm::DhKem25519, kdf, aead))
+    hpke_provider::new(Mode::Base, KemAlgorithm::DhKem25519, kdf, aead)
+        .map_err(|_| ReaderSealError::Suite)
 }
 
 /// The key pair the KEM derives from `ikm` (RFC 9180 section 7.1.3).
@@ -176,12 +169,7 @@ pub fn seal(
     info: &[u8],
     plaintext: &[u8],
 ) -> Result<([u8; KEY_LEN], Vec<u8>), ReaderSealError> {
-    let mut hpke = hpke(reader_seal_suite())?;
-    #[cfg(test)]
-    if let Some(seed) = EPHEMERAL_SEED.with(|seed| seed.borrow_mut().take()) {
-        hpke.seed(&seed).map_err(|_| ReaderSealError::Seal)?;
-    }
-    let (enc, ciphertext) = hpke
+    let (enc, ciphertext) = hpke(reader_seal_suite())?
         .seal(
             &HpkePublicKey::from(public.as_bytes().as_slice()),
             info,

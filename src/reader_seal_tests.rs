@@ -1,6 +1,7 @@
 use openmls::prelude::Ciphersuite;
 
 use super::*;
+use crate::hpke_provider::EPHEMERAL_SEED;
 use crate::suite_policy::{ReaderSealSuite, READER_SEAL_SUITE_OVERRIDE};
 
 fn unhex(text: &str) -> Vec<u8> {
