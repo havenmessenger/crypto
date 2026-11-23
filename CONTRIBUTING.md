@@ -15,7 +15,9 @@ Please also follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Workflow
 1. Open an issue describing the change before large work.
-2. `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`, and `cargo audit` must pass.
+2. `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test`, and
+   `cargo deny --locked check -D unknown-advisory -D advisory-not-detected advisories` must pass. An advisory ignore
+   goes in `deny.toml` with its reason and a `until:` condition (`scripts/check_advisory_conditions.py`).
 3. Sign off your commits (`git commit -s`, adding a `Signed-off-by` trailer per the
    [Developer Certificate of Origin](https://developercertificate.org/)) - GPG-signing is welcome
    too but not required.

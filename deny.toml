@@ -1,0 +1,41 @@
+# cargo-deny configuration: the advisory check for this crate. CI runs
+# `cargo deny --locked check -D unknown-advisory -D advisory-not-detected advisories`, so an ignore that no longer
+# matches anything in the resolved graph, or names an advisory the database does not know, fails the job: an ignore
+# cannot outlive its reason unnoticed.
+#
+# Every ignore's reason ends with one machine-checked condition, `until: <condition>`, which
+# scripts/check_advisory_conditions.py enforces. When the condition comes true the ignore must be revisited:
+#   until: lock <crate> >= <version>               every locked <crate> is at least <version>
+#   until: release <crate> beyond <version>        <crate>'s newest stable release is newer than <version>
+#   until: release <crate> requires <dep> <req>    <crate>'s newest stable release requires <dep> as <req>
+#   until: release <crate> drops <dep>             <crate>'s newest stable release no longer depends on <dep>
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unused-ignored-advisory = "deny"
+ignore = [
+    # `rsa` Marvin attack timing side-channel. Chain: rsa 0.9 <- pgp <- crypto-core, compiled. Accepted risk: the
+    # vulnerable operation is RSA PKCS#1 v1.5 decryption on the caller's own device, and RSA is never the key type
+    # this crate generates (ECC Curve25519 is the default); there is no remote timing oracle. The fix is rsa 0.10.0,
+    # released, but pgp (to its newest release) still requires rsa ^0.9, so it cannot be taken yet.
+    { id = "RUSTSEC-2023-0071", reason = "Marvin attack on rsa 0.9: on-device decryption only, no remote timing oracle; the fixed rsa 0.10 is blocked by pgp. until: release pgp requires rsa ^0.10" },
+
+    # `proc-macro-error2` unmaintained, no known vulnerability. Chain: proc-macro-error2 <- hax-lib-macros 0.3 <-
+    # hax-lib 0.3 <- core-models <- libcrux-intrinsics <- libcrux-sha3 <- hpke-rs. A procedural macro, run at build
+    # time only. hax-lib-macros 0.5 has dropped it; libcrux-intrinsics, newest release, still requires hax-lib ^0.4.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained: build-time macro under hax-lib 0.3, not in the shipped artifact. until: release libcrux-intrinsics requires hax-lib ^0.5" },
+
+    # `crypto-bigint` 0.5.5 can branch on secret values. Chain: crypto-bigint 0.5.5 <- elliptic-curve 0.13 <-
+    # {p256, p384, p521, k256, ecdsa, primeorder} 0.13 <- pgp <- crypto-core. Accepted risk: the leak needs secret
+    # integers on the NIST/secp curves inside pgp; this crate's own keys are Ed25519/Curve25519 or RSA, and nothing
+    # returns operation timing to a remote party. The fix (0.7.6) needs elliptic-curve 0.14, which pgp has not taken.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via pgp's elliptic-curve 0.13 family; this crate's keys never take the NIST/secp path. until: release pgp requires elliptic-curve ^0.14" },
+
+    # `chrono` unmaintained, no known vulnerability and no maintained release. Used directly by this crate and by
+    # pgp 0.14; pgp's newest release has dropped it, so the way out is this crate's own pgp upgrade plus its direct use.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no vulnerability; used here and by pgp 0.14 (dropped in newer pgp). until: lock pgp >= 0.21.0" },
+]

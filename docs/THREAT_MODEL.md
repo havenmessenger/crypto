@@ -121,8 +121,12 @@ Ed25519, `rPGP`, `openmls`), sourced from crates.io, or for `openmls` from its o
 one exact revision, with no vendored or forked copies.
 Every cryptographic operation is gated by known-answer tests against published RFC/NIST test
 vectors, so a dependency regression that silently changed output would fail the test suite, not
-ship silently. `cargo audit` runs in CI against the full dependency tree; every currently-ignored
-advisory has a written, reasoned disposition in `.cargo/audit.toml` (reachability traced against
-the actual call graph, not assumed away).
-**Residual:** a disposition in `.cargo/audit.toml` is only as good as the reasoning behind it -
-each one is re-evaluated whenever the dependency graph that produced it changes.
+ship silently. `cargo deny` checks advisories in CI against the full dependency graph, on every
+change and daily; every currently-ignored advisory has a written, reasoned disposition in
+`deny.toml` (reachability traced against the actual call graph, not assumed away), and a yanked
+crate fails the check.
+**Residual:** a disposition in `deny.toml` is only as good as the reasoning behind it. Two checks
+keep it from going stale silently: an ignore that no longer matches anything in the graph fails
+CI, and each ignore ends with a machine-checked `until:` condition
+(`scripts/check_advisory_conditions.py`) that fails the daily run when its reason stops being true
+upstream, such as a dependent releasing on the fixed version.
