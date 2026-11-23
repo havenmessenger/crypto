@@ -53,6 +53,26 @@ jobs:
         # last-resort KeyPackage, so the crate is linted and tested in that state too.
         run: cargo clippy --lib --features mimi-app-data -- -D warnings && cargo test --features mimi-app-data
 
+  secrets:
+    # The same gitleaks version as the pre-commit hook, with .gitleaks.toml, over the checked-out tree. The release
+    # archive is checked against its published SHA-256 before it runs.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: install gitleaks
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+      - name: gitleaks
+        run: '"$RUNNER_TEMP/gitleaks" detect --source . --no-git --redact --no-banner --config .gitleaks.toml'
+
   advisories:
     # Every advisory ignore lives in deny.toml with its reason and a machine-checked `until:` condition. cargo-deny
     # fails an ignore that no longer matches anything or names an unknown advisory, and a yanked crate; the condition

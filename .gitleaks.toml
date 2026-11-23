@@ -1,0 +1,18 @@
+title = "crypto Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Confirmed false positives - verified not real secrets"
+paths = [
+    # RFC 9420 crypto-basics test vectors, copied from mlswg/mls-implementations (the file's `source` field names the
+    # upstream file). Their keys and secrets are published so every implementation can check against them.
+    '''src/mls/targeted/testdata/rfc9420_crypto_basics\.json$''',
+    # The known-answer stored message and both members' group state (src/mls/targeted/tests/kat.rs). Its keys exist
+    # only for this vector, which only the ignored `regenerate_stored_message` test writes.
+    '''src/mls/targeted/testdata/stored_message_v1\.json$''',
+    # Cargo lockfiles: crate names, versions and registry checksums only. A dependency named `libcrux-secrets`
+    # followed by the next entry's line reads as a generic API key to the default rules.
+    '''(^|/)Cargo\.lock$''',
+]
