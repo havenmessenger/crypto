@@ -3,8 +3,8 @@ title = "crypto Gitleaks Config"
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Confirmed false positives - verified not real secrets"
+[[allowlists]]
+description = "Test vectors whose keys are published or exist only for the vector"
 paths = [
     # RFC 9420 crypto-basics test vectors, copied from mlswg/mls-implementations (the file's `source` field names the
     # upstream file). Their keys and secrets are published so every implementation can check against them.
@@ -12,7 +12,13 @@ paths = [
     # The known-answer stored message and both members' group state (src/mls/targeted/tests/kat.rs). Its keys exist
     # only for this vector, which only the ignored `regenerate_stored_message` test writes.
     '''src/mls/targeted/testdata/stored_message_v1\.json$''',
-    # Cargo lockfiles: crate names, versions and registry checksums only. A dependency named `libcrux-secrets`
-    # followed by the next entry's line reads as a generic API key to the default rules.
-    '''(^|/)Cargo\.lock$''',
 ]
+
+# Cargo lockfiles stay scanned. The default generic-api-key rule reads the dependency name `libcrux-secrets`, with the
+# line after it, as a key; only a generic-api-key finding whose match contains that crate name is skipped. A path
+# entry would not do: gitleaks skips an allowlisted path whole, whatever else the entry says.
+[[allowlists]]
+description = "libcrux-secrets dependency name"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''libcrux-secrets''']
