@@ -292,7 +292,9 @@ pub fn hkdf_sha256(
 /// malformation check available here. Kept only so already-encrypted CTR blobs (MLS-identity
 /// backup + contact-history) stay decryptable on a fresh-device restore, over already-authenticated
 /// caller-controlled storage, not network input. Fail-closed on malformed PKCS7 (never returns
-/// truncated plaintext). See `docs/THREAT_MODEL.md` for the residual this function represents.
+/// truncated plaintext). Every padding failure returns the same error, decided without branching on
+/// the plaintext bytes (see [`pkcs7_padding_valid`]), so a failure says only that the padding was
+/// invalid, not where or how. See `docs/THREAT_MODEL.md` for the residual this function represents.
 pub fn aes_ctr_256_pkcs7_open(
     key: Vec<u8>,
     iv: Vec<u8>,
@@ -313,20 +315,38 @@ pub fn aes_ctr_256_pkcs7_open(
     }
     let mut cipher = Aes256Ctr::new_from_slices(&key, &iv)
         .map_err(|e| anyhow::anyhow!("aes_ctr_256_pkcs7_open: init failed: {e}"))?;
-    let mut buf = ciphertext;
-    cipher.apply_keystream(&mut buf);
-    let n = *buf
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("aes_ctr_256_pkcs7_open: empty plaintext"))?
-        as usize;
-    if n == 0 || n > 16 || n > buf.len() {
-        anyhow::bail!("aes_ctr_256_pkcs7_open: invalid PKCS7 pad length");
+    // The ciphertext length is public, so an empty input may say so; the padding may not.
+    if ciphertext.is_empty() {
+        anyhow::bail!("aes_ctr_256_pkcs7_open: empty plaintext");
     }
-    if buf[buf.len() - n..].iter().any(|&b| b as usize != n) {
+    // Wiped on drop, so a plaintext rejected for its padding does not linger in memory.
+    let mut buf = Zeroizing::new(ciphertext);
+    cipher.apply_keystream(&mut buf);
+    if !pkcs7_padding_valid(&buf) {
         anyhow::bail!("aes_ctr_256_pkcs7_open: invalid PKCS7 padding");
     }
-    buf.truncate(buf.len() - n);
-    Ok(buf)
+    let n = usize::from(buf[buf.len() - 1]);
+    let mut plaintext = std::mem::take(&mut *buf);
+    plaintext.truncate(plaintext.len() - n);
+    Ok(plaintext)
+}
+
+/// Whether `buf` (non-empty) ends in valid PKCS7 padding for a 16-byte block: a final byte `n` with
+/// `1 <= n <= 16` and `n <= buf.len()`, repeated in each of the last `n` bytes. Every condition is
+/// evaluated as a `subtle::Choice` over a window of `min(buf.len(), 16)` bytes, with no branch or
+/// early exit that depends on the plaintext, so how long the check takes does not reveal which
+/// byte, or which condition, failed. The window size depends only on the length, which is public.
+fn pkcs7_padding_valid(buf: &[u8]) -> bool {
+    use subtle::{Choice, ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
+    let len = buf.len();
+    let n = buf[len - 1];
+    let mut ok: Choice = !n.ct_eq(&0) & !n.ct_gt(&16) & !u64::from(n).ct_gt(&(len as u64));
+    // `i` counts back from the last byte; a byte is inside the pad when `i < n`.
+    for (i, b) in (0u8..).zip(buf[len - len.min(16)..].iter().rev()) {
+        let in_pad = i.ct_lt(&n);
+        ok &= !in_pad | b.ct_eq(&n);
+    }
+    ok.into()
 }
 
 /// Generate a fresh 24-word English mnemonic from 256 bits of `OsRng` entropy.
@@ -935,6 +955,64 @@ mod tests {
         assert!(
             aes_ctr_256_pkcs7_open(key, iv, ct).is_err(),
             "tampered PKCS7 pad must fail-closed"
+        );
+    }
+
+    /// CTR-encrypts `plaintext` exactly as given, padding included, so a test can choose the padding
+    /// the reader sees after decryption.
+    fn ctr_with_chosen_padding(plaintext: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let key: Vec<u8> = (0u8..32).collect();
+        let iv = hex::decode("07121d28333e49545f6a75808b96a1ac").unwrap();
+        let mut ct = plaintext.to_vec();
+        Aes256Ctr::new_from_slices(&key, &iv)
+            .unwrap()
+            .apply_keystream(&mut ct);
+        (key, iv, ct)
+    }
+
+    /// Every kind of padding failure (a zero pad byte, a pad byte above the block size, a pad longer
+    /// than the data, a wrong byte inside the pad) returns the same error text, so a caller that
+    /// shows the error cannot tell them apart.
+    #[test]
+    fn aes_ctr_256_pkcs7_open_padding_failures_share_one_error() {
+        let cases: [&[u8]; 7] = [
+            b"hello world\x00",
+            b"hello world\x11",
+            b"\x05",
+            b"hello world\x03\x02\x03",
+            b"hello world\x01\x02",
+            b"0123456789abcdef\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x0f\x10",
+            b"0123456789abcdef\x0f\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10\x10",
+        ];
+        let errors: Vec<String> = cases
+            .iter()
+            .map(|pt| {
+                let (key, iv, ct) = ctr_with_chosen_padding(pt);
+                aes_ctr_256_pkcs7_open(key, iv, ct)
+                    .expect_err("malformed padding must be refused")
+                    .to_string()
+            })
+            .collect();
+        for e in &errors {
+            assert_eq!(e, "aes_ctr_256_pkcs7_open: invalid PKCS7 padding");
+        }
+    }
+
+    /// Every valid pad length, 1 through a full 16-byte block, opens to the data before the pad.
+    #[test]
+    fn aes_ctr_256_pkcs7_open_accepts_every_valid_pad_length() {
+        for n in 1u8..=16 {
+            let data = b"legacy contact-history value";
+            let mut pt = data.to_vec();
+            pt.extend(std::iter::repeat(n).take(usize::from(n)));
+            let (key, iv, ct) = ctr_with_chosen_padding(&pt);
+            let out = aes_ctr_256_pkcs7_open(key, iv, ct).unwrap();
+            assert_eq!(out, data, "pad length {n}");
+        }
+        let (key, iv, ct) = ctr_with_chosen_padding(&[16u8; 16]);
+        assert_eq!(
+            aes_ctr_256_pkcs7_open(key, iv, ct).unwrap(),
+            Vec::<u8>::new()
         );
     }
 

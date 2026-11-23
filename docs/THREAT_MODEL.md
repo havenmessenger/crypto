@@ -104,9 +104,15 @@ fresh-device restore.
 contact-history blobs decryptable across a migration from the CTR+PKCS7 format this crate no
 longer writes. It is decrypt-only, never used for new writes, and only ever reads a blob the
 caller's own storage already holds - not network input. It is fail-closed on malformed PKCS7
-padding (never returns truncated plaintext), but CTR is a stream cipher with no integrity tag,
-so a bit-flip in the ciphertext produces a corresponding bit-flip in the recovered plaintext
-that this function cannot detect.
+padding (never returns truncated plaintext), and every padding failure returns the same error,
+decided without branching on the plaintext bytes, so a failure does not say whether the pad length
+or the pad content was wrong, nor where. CTR is a stream cipher with no integrity tag, so a
+bit-flip in the ciphertext produces a corresponding bit-flip in the recovered plaintext that this
+function cannot detect.
+**Padding oracle: reduced, not closed.** Whether a read succeeded is still one bit of signal, and
+this function cannot hide it: a caller that lets whoever modified the blob observe success or
+failure (an error shown to them, a write that happens only on success) gives them that bit per
+attempt. Keeping it unobservable is the caller's part.
 **Residual:** an attacker who can tamper with this specific at-rest blob between write and
 read gets undetected plaintext corruption on that blob, unlike every other read path in this
 crate (which is AEAD or MDC-protected). Planned retirement: a re-encrypt-on-read migration that
