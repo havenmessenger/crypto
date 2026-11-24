@@ -775,6 +775,7 @@ pub(crate) fn staged(
 
 /// [`staged`], and the group's ratchet tree after the commit, TLS-encoded: what a hub that tracks the group's tree
 /// needs with the commit.
+#[cfg(feature = "mimi-app-data")]
 pub(crate) fn staged_with_tree(
     opened: OpenedGroup,
     commit: &MlsMessageOut,
