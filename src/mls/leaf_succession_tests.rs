@@ -228,3 +228,76 @@ fn a_mimi_commit_renaming_its_committers_leaf_is_refused() {
     mls_process_commit_appsync(alice_state, alice, kept)
         .expect("a MIMI renewal keeping Bob's identity is taken");
 }
+
+/// `bytes` as a protocol message a member processes.
+fn protocol_message(bytes: &[u8]) -> ProtocolMessage {
+    use tls_codec::Deserialize as _;
+    ProtocolMessage::try_from(MlsMessageIn::tls_deserialize_exact(bytes).unwrap()).unwrap()
+}
+
+/// An Update proposal's leaf is checked as the committer's is. Bob proposes an Update naming `identity` while keeping his
+/// key; Alice and Mallory store it, Alice commits it by reference, and the check on Mallory's staged commit refuses the
+/// rename and takes Bob's own name. No receive path of this crate stores a member's Update today, so this runs the check
+/// on the staged commit directly. Revert check: skip the Update proposals in the check, and the rename is taken.
+#[test]
+fn an_update_proposal_renaming_its_senders_leaf_is_refused() {
+    for (identity, refused) in [("mallory", true), ("bob", false)] {
+        let [(alice_state, alice), (bob_state, bob), (mallory_state, mallory)] =
+            alice_bob_mallory();
+        let mut alice = open_group(alice_state, alice).unwrap();
+        let mut bob = open_group(bob_state, bob).unwrap();
+        let mut mallory = open_group(mallory_state, mallory).unwrap();
+        let key = bob.group.own_leaf_node().unwrap().signature_key().clone();
+        let parameters = LeafNodeParameters::builder()
+            .with_credential_with_key(CredentialWithKey {
+                credential: BasicCredential::new(identity.as_bytes().to_vec()).into(),
+                signature_key: key,
+            })
+            .build();
+        let (proposal, _) = bob
+            .group
+            .propose_self_update(&bob.provider, &bob.signer, parameters)
+            .unwrap();
+        let proposal = proposal.tls_serialize_detached().unwrap();
+        for member in [&mut alice, &mut mallory] {
+            let processed = member
+                .group
+                .process_message(&member.provider, protocol_message(&proposal))
+                .unwrap();
+            let ProcessedMessageContent::ProposalMessage(queued) = processed.into_content() else {
+                panic!("Bob's Update is a proposal");
+            };
+            member
+                .group
+                .store_pending_proposal(member.provider.storage(), *queued)
+                .unwrap();
+        }
+        let (commit, _, _) = alice
+            .group
+            .commit_to_pending_proposals(&alice.provider, &alice.signer)
+            .unwrap();
+        let processed = mallory
+            .group
+            .process_message(
+                &mallory.provider,
+                protocol_message(&commit.tls_serialize_detached().unwrap()),
+            )
+            .unwrap();
+        let ProcessedMessageContent::StagedCommitMessage(staged) = processed.into_content() else {
+            panic!("Alice's commit stages");
+        };
+        assert_eq!(
+            staged.update_proposals().count(),
+            1,
+            "the commit covers Bob's Update"
+        );
+        let verdict =
+            super::require_leaf_identity_kept(&mallory.group, &staged, LeafNodeIndex::new(0));
+        assert_eq!(
+            verdict.as_ref().err().map(CommitRefusal::reason),
+            refused.then_some(CommitRefusalReason::Credential),
+            "PLANT-LEAF-ID-UPDATE: Bob's Update naming {identity} was {}",
+            if refused { "taken" } else { "refused" }
+        );
+    }
+}
