@@ -912,7 +912,7 @@ fn the_first_commit_carries_what_a_hub_tracks_the_room_from() {
     let opened = open_group(installed, alice).unwrap();
     assert_eq!(
         hub_group.group_context(),
-        opened.group.export_group_context(),
+        opened.group.public_group().group_context(),
         "the hub's group is the one the committer installs"
     );
     assert_eq!(
