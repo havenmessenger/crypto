@@ -166,6 +166,47 @@ fn every_member_holds_the_same_list_after_each_change() {
     }
 }
 
+/// The native receive paths never resolve an app data commit. Bob's room state, handed to the native commit and decrypt
+/// functions with Alice's AppDataUpdate commit, is refused by name both times, and nothing comes back to store; the
+/// MIMI lane then still reads the same commit.
+#[test]
+fn the_native_receive_paths_refuse_an_app_data_commit() {
+    let (alice_state, alice, bob_state, _, bob) = room_with_bob_and_his_bundle();
+    let (carol_kp, _) = identity("carol");
+    let pending = mimi_commit_app_data_pending(
+        alice_state,
+        alice,
+        vec![carol_kp],
+        Vec::new(),
+        vec![(LIST, b"carol".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .unwrap();
+    let commit = pending.commit().to_vec();
+    let refused =
+        crate::mls::groups::mls_process_commit(bob_state.clone(), bob.clone(), commit.clone())
+            .expect_err("PLANT-NATIVE-APP-DATA-COMMIT: the native commit path refuses it");
+    assert!(
+        refused
+            .to_string()
+            .contains(crate::mls::groups::NATIVE_REFUSES_APP_DATA_COMMIT),
+        "refused by name: {refused}"
+    );
+    let refused =
+        crate::mls::groups::decrypt_message(bob_state.clone(), bob.clone(), commit.clone())
+            .expect_err("PLANT-NATIVE-APP-DATA-DECRYPT: the native decrypt path refuses it");
+    assert!(
+        refused
+            .to_string()
+            .contains(crate::mls::groups::NATIVE_REFUSES_APP_DATA_COMMIT),
+        "refused by name: {refused}"
+    );
+    let (after, _) = mimi_process_commit_app_data(bob_state, bob, commit, &append)
+        .expect("the MIMI lane still reads the commit");
+    assert_eq!(list(&after), b"alice,bob,carol");
+}
+
 /// A member whose rules give another value, or refuse the update, refuses the commit: its GroupContext would differ
 /// from the committer's, which openmls refuses on the confirmation tag.
 #[test]

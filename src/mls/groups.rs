@@ -320,6 +320,11 @@ pub(crate) fn encrypt_in(
     Ok(message.tls_serialize_detached()?)
 }
 
+/// Why the native receive paths refuse a commit covering AppDataUpdate proposals, which only the MIMI lane resolves
+/// (INV-MIMI-003).
+pub const NATIVE_REFUSES_APP_DATA_COMMIT: &str =
+    "a native group refuses an app data commit: resolving AppDataUpdate is the MIMI lane's";
+
 pub fn decrypt_message(
     group_state_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
@@ -389,9 +394,11 @@ pub(crate) fn decrypt_in(
 
     let content = match processed_message.into_content() {
         ProcessedMessageContent::ApplicationMessage(app_msg) => app_msg.into_bytes(),
-        // Anything else is refused here, commits included. With the `mimi-app-data` feature, openmls hands back a
-        // commit covering AppDataUpdate proposals unvalidated (`UnresolvedAppDataCommit`); it is never resolved on
-        // this native path (INV-MIMI-003).
+        // Never resolved on this native path; see mls_process_commit.
+        #[cfg(feature = "mimi-app-data")]
+        ProcessedMessageContent::UnresolvedAppDataCommit(_) => {
+            return Err(anyhow::anyhow!(NATIVE_REFUSES_APP_DATA_COMMIT))
+        }
         _ => return Err(anyhow::anyhow!("Not an application message")),
     };
 
@@ -1059,11 +1066,14 @@ pub fn mls_process_commit(
                 .merge_staged_commit(&provider, *staged)
                 .map_err(|e| anyhow::anyhow!("Error merging staged commit: {:?}", e))?;
         }
-        // Only a staged commit is applied. With the `mimi-app-data` feature, openmls returns a commit covering
-        // AppDataUpdate proposals without validating it (`UnresolvedAppDataCommit`), for the application to
-        // resolve. Resolving one is the MIMI lane's job and never a native group's. In that build this refusal is
-        // the only thing that keeps a native group from taking an app data change (INV-MIMI-003), so it must stay
-        // a refusal.
+        // With the `mimi-app-data` feature, openmls returns a commit covering AppDataUpdate proposals without
+        // validating it, for the application to resolve. Resolving one is the MIMI lane's job and never a native
+        // group's. In that build this arm is the only thing that keeps a native group from taking an app data change
+        // (INV-MIMI-003), so it stays an explicit refusal rather than falling to the arm below.
+        #[cfg(feature = "mimi-app-data")]
+        ProcessedMessageContent::UnresolvedAppDataCommit(_) => {
+            return Err(anyhow::anyhow!(NATIVE_REFUSES_APP_DATA_COMMIT))
+        }
         _ => {
             return Err(anyhow::anyhow!(
                 "Expected a Commit, got a different message type"
