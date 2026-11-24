@@ -18,7 +18,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{member_index, validated_key_package};
-use crate::mls::pending::{open_group, staged, staged_with_tree, PendingCommit, WelcomeForm};
+use crate::mls::pending::{open_group, staged_with_tree, PendingCommit, WelcomeForm};
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
 
 /// One change to a component that a commit carries.
