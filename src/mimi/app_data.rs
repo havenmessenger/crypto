@@ -617,6 +617,13 @@ pub fn mimi_process_commit_app_data_summarized(
         }
         _ => anyhow::bail!("Expected a Commit, got a different message type"),
     };
+    // A member's renewed leaf keeps its credential identity (`leaf_succession`).
+    crate::mls::leaf_succession::require_leaf_identity_kept(
+        &group,
+        &staged_commit,
+        openmls::prelude::LeafNodeIndex::new(sender.leaf_index),
+    )
+    .map_err(anyhow::Error::new)?;
     let summary = super::view::commit_summary(&staged_commit, sender.leaf_index);
     group
         .merge_staged_commit(&provider, staged_commit)

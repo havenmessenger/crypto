@@ -10,6 +10,7 @@ pub mod commit_refusal;
 pub mod entry_codec;
 pub mod groups;
 pub mod inspection;
+pub(crate) mod leaf_succession;
 pub mod own_message;
 pub mod pending;
 pub mod processing_error;

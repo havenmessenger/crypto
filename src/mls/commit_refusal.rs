@@ -60,6 +60,15 @@ impl CommitRefusal {
         }
     }
 
+    /// A Commit in which a member's new leaf names another credential identity than the leaf it replaces
+    /// ([`crate::mls::leaf_succession`]).
+    pub(crate) fn leaf_identity_changed() -> Self {
+        Self {
+            reason: CommitRefusalReason::Credential,
+            words: crate::mls::leaf_succession::LEAF_IDENTITY_CHANGED.to_string(),
+        }
+    }
+
     /// What the refusal says about the Commit.
     #[must_use]
     pub const fn reason(&self) -> CommitRefusalReason {

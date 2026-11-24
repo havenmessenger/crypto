@@ -937,6 +937,13 @@ pub fn mimi_process_commit_summarized(
                     }
                 }
             }
+            // A member's renewed leaf keeps its credential identity (`leaf_succession`).
+            crate::mls::leaf_succession::require_leaf_identity_kept(
+                &group,
+                &staged,
+                openmls::prelude::LeafNodeIndex::new(sender.leaf_index),
+            )
+            .map_err(anyhow::Error::new)?;
             group
                 .merge_staged_commit(&provider, *staged)
                 .map_err(|e| anyhow::Error::new(crate::mls::CommitRefusal::merging(&e)))?;

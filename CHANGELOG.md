@@ -5,6 +5,12 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- A member's renewed leaf keeps its credential identity (RFC 9420 §5.3.1, a valid successor). The commit receive paths
+  (`mls::groups::mls_process_commit`, `mimi::mls_process_commit_appsync` and its variants, and
+  `mimi::app_data::mimi_process_commit_app_data`) refuse a commit, before it is merged, whose UpdatePath leaf, or an
+  Update proposal's leaf, carries another identity than the leaf it replaces: both must be Basic credentials with the
+  same identity bytes. The refusal is a `CommitRefusal` with reason `Credential`, and the caller's state is unchanged. A
+  signing-key rotation keeps the identity and is taken as before.
 - `mimi::prepare_welcome_pinned` with `ExternalSendersPin`: a Welcome join that states what the joined group's external
   senders must be. With `NoExternalSenders`, a group naming any external sender is refused after the spend
   (`MimiWelcomeError::Spent`), so no party the joiner did not configure gets an external sender's standing; with `Hub`, it

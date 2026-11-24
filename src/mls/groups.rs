@@ -1062,6 +1062,13 @@ pub fn mls_process_commit(
     let sender = crate::mls::authenticated_sender(&group, &processed)?;
     match processed.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged) => {
+            // A member's renewed leaf keeps its credential identity (`leaf_succession`).
+            crate::mls::leaf_succession::require_leaf_identity_kept(
+                &group,
+                &staged,
+                openmls::prelude::LeafNodeIndex::new(sender.leaf_index),
+            )
+            .map_err(anyhow::Error::new)?;
             group
                 .merge_staged_commit(&provider, *staged)
                 .map_err(|e| anyhow::anyhow!("Error merging staged commit: {:?}", e))?;

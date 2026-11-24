@@ -974,3 +974,29 @@ fn a_commit_without_an_add_carries_the_groupinfo_and_tree_and_no_welcome() {
         next.pending.predecessor_epoch() + 1
     );
 }
+
+/// Bob renews his leaf with a credential naming Carol: Alice refuses the commit as a credential refusal, on this path as
+/// on the others, and his renewal under his own name is taken. Revert check: drop the check from
+/// `mimi_process_commit_app_data_summarized`, and Alice takes the renamed commit.
+#[test]
+fn a_commit_renaming_its_committers_leaf_is_refused() {
+    use crate::mls::commit_refusal::{CommitRefusal, CommitRefusalReason};
+    use crate::mls::leaf_succession::tests::self_update_naming;
+    let (alice_state, alice, bob_state, _, bob) = room_with_bob_and_his_bundle();
+    let renamed = self_update_naming(bob_state.clone(), bob.clone(), "mimi://hub.example/u/carol");
+    let refused =
+        mimi_process_commit_app_data(alice_state.clone(), alice.clone(), renamed, &append);
+    assert_eq!(
+        refused
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<CommitRefusal>())
+            .map(CommitRefusal::reason),
+        Some(CommitRefusalReason::Credential),
+        "PLANT-LEAF-ID-APP-DATA: a commit renaming its committer's leaf was taken: {:?}",
+        refused.map(|_| ())
+    );
+    let kept = self_update_naming(bob_state, bob, "mimi://hub.example/u/bob");
+    mimi_process_commit_app_data(alice_state, alice, kept, &append)
+        .expect("Bob's renewal under his own name is taken");
+}
