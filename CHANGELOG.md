@@ -5,6 +5,10 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- `mimi::prepare_welcome_pinned` with `ExternalSendersPin`: a Welcome join that states what the joined group's external
+  senders must be. With `NoExternalSenders`, a group naming any external sender is refused after the spend
+  (`MimiWelcomeError::Spent`), so no party the joiner did not configure gets an external sender's standing; with `Hub`, it
+  must name exactly that hub. `prepare_welcome_retirement` is unchanged: an empty hub key leaves them unchecked.
 - `mimi::app_data::mimi_commit_app_data_bundle`: a MIMI commit with what the room's hub takes beside it
   (draft-ietf-mimi-protocol §5.3 `HandshakeBundle`): the bare Welcome for added members, the committer-signed
   `GroupInfo` for the epoch after the commit (TLS, no `MLSMessage` wrap), and the ratchet tree after it, from which a hub

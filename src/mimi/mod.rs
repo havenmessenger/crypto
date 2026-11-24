@@ -1030,14 +1030,37 @@ pub struct PreparedWelcome {
     // drop; the caller's persisted copy is the durable one.
     retired_bundle: Vec<u8>,
     // Ephemeral phase-2 material. `identity` self-wipes (its Drop); `original_storage` is wiped by this
-    // struct's Drop; `welcome`/`ratchet_tree`/`expected_hub_entry` are public wire bytes. `Option` so
+    // struct's Drop; `welcome`/`ratchet_tree`/`hub_check` are public wire bytes. `Option` so
     // complete_welcome can move them out of a Drop type via `.take()` (Rust forbids moving fields out
     // of a Drop type).
     identity: Option<IdentityBundle>,
     original_storage: Vec<(Vec<u8>, Vec<u8>)>,
     welcome: Option<Welcome>,
     ratchet_tree: Option<Vec<u8>>,
-    expected_hub_entry: Option<Vec<u8>>,
+    hub_check: Option<HubCheck>,
+}
+
+/// The external senders a group joined from a Welcome must name, given to [`prepare_welcome_pinned`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalSendersPin {
+    /// None at all: a room whose hub holds no key in its group, as every room the MIMI lane creates.
+    NoExternalSenders,
+    /// Exactly one, this hub: its signature public key and its credential's identity.
+    Hub {
+        signature_key: Vec<u8>,
+        credential_identity: String,
+    },
+    /// Not checked here, for a caller that checks the joined group's external senders itself.
+    Unchecked,
+}
+
+/// What [`complete_welcome`] checks the joined group's external senders against.
+#[derive(Debug, Clone)]
+enum HubCheck {
+    NoExternalSenders,
+    /// The one expected `ExternalSender`, TLS-serialized.
+    Entry(Vec<u8>),
+    Unchecked,
 }
 
 impl PreparedWelcome {
@@ -1057,7 +1080,7 @@ impl Drop for PreparedWelcome {
             v.zeroize();
         }
         // identity (Option<IdentityBundle>) self-wipes via IdentityBundle::drop if still Some;
-        // welcome and expected_hub_entry are HPKE-sealed / PUBLIC wire bytes, not secret material.
+        // welcome and hub_check are HPKE-sealed / PUBLIC wire bytes, not secret material.
     }
 }
 
@@ -1180,13 +1203,32 @@ fn candidate_retirement(
 ///
 /// Hub-identity pinning: `expected_hub_signature_key_bytes`/`expected_hub_credential_identity`, when
 /// non-empty, pin the hub the caller configured for this room (checked in [`complete_welcome`] against
-/// the joined group's single `ExternalSendersExtension` entry). Empty = a hub-less group (the current
-/// `mimi_create_group` production path), pinning nothing.
+/// the joined group's single `ExternalSendersExtension` entry). Empty leaves the joined group's external
+/// senders unchecked ([`ExternalSendersPin::Unchecked`]); [`prepare_welcome_pinned`] can require none.
 pub fn prepare_welcome_retirement(
     mls_welcome_message_bytes: Vec<u8>,
     bundle_bytes: Vec<u8>,
     expected_hub_signature_key_bytes: Vec<u8>,
     expected_hub_credential_identity: String,
+) -> Result<PreparedWelcome, MimiWelcomeError> {
+    let pin = if expected_hub_signature_key_bytes.is_empty() {
+        ExternalSendersPin::Unchecked
+    } else {
+        ExternalSendersPin::Hub {
+            signature_key: expected_hub_signature_key_bytes,
+            credential_identity: expected_hub_credential_identity,
+        }
+    };
+    prepare_welcome_pinned(mls_welcome_message_bytes, bundle_bytes, pin)
+}
+
+/// [`prepare_welcome_retirement`], with the joined group's external senders checked against `pin`. With
+/// [`ExternalSendersPin::NoExternalSenders`], a group that names any external sender is refused, so no
+/// party the caller did not configure gets an external sender's standing (INV-MLS-001b).
+pub fn prepare_welcome_pinned(
+    mls_welcome_message_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    pin: ExternalSendersPin,
 ) -> Result<PreparedWelcome, MimiWelcomeError> {
     // Wrap the owned bundle input on entry (see crate::mls::groups::process_welcome's comment).
     // mls_welcome_message_bytes is an MLS Welcome (HPKE-sealed wire form) and
@@ -1257,20 +1299,24 @@ pub fn prepare_welcome_retirement(
     // group and pins nothing. `ExternalSender`'s fields are pub(crate) in openmls, so the pin compares
     // TLS-serialized bytes - byte-identical serialization IS structural equality for this type, built
     // the exact way `mimi_create_group_with_external_senders` builds the real one.
-    let expected_hub_entry: Option<Vec<u8>> = if expected_hub_signature_key_bytes.is_empty() {
-        None
-    } else {
-        let expected_pub = SignaturePublicKey::try_from(expected_hub_signature_key_bytes)
-            .map_err(|_| anyhow::anyhow!("Invalid expected hub signature key bytes"))?;
-        let expected_credential: Credential =
-            BasicCredential::new(expected_hub_credential_identity.into_bytes()).into();
-        let expected_entry = ExternalSender::new(expected_pub, expected_credential);
-        Some(
-            expected_entry
-                .tls_serialize_detached()
-                .map_err(|e| anyhow::anyhow!("Failed to serialize expected hub entry: {e:?}"))?,
-        )
-    };
+    let hub_check =
+        match pin {
+            ExternalSendersPin::NoExternalSenders => HubCheck::NoExternalSenders,
+            ExternalSendersPin::Unchecked => HubCheck::Unchecked,
+            ExternalSendersPin::Hub {
+                signature_key,
+                credential_identity,
+            } => {
+                let expected_pub = SignaturePublicKey::try_from(signature_key)
+                    .map_err(|_| anyhow::anyhow!("Invalid expected hub signature key bytes"))?;
+                let expected_credential: Credential =
+                    BasicCredential::new(credential_identity.into_bytes()).into();
+                let expected_entry = ExternalSender::new(expected_pub, expected_credential);
+                HubCheck::Entry(expected_entry.tls_serialize_detached().map_err(|e| {
+                    anyhow::anyhow!("Failed to serialize expected hub entry: {e:?}")
+                })?)
+            }
+        };
 
     // Built with NO join and NO spend. If a candidate-specific retirement cannot be made, retain the
     // broader fail-closed fallback rather than leaving a potentially spent KeyPackage live.
@@ -1285,7 +1331,7 @@ pub fn prepare_welcome_retirement(
         original_storage,
         welcome: Some(welcome),
         ratchet_tree: ratchet_tree_bytes,
-        expected_hub_entry,
+        hub_check: Some(hub_check),
     })
 }
 
@@ -1346,7 +1392,11 @@ pub fn complete_welcome_with(
     };
     let ratchet_tree_bytes = prepared.ratchet_tree.take();
     let original_storage = mem::take(&mut prepared.original_storage);
-    let expected_hub_entry = prepared.expected_hub_entry.take();
+    // Taken after `identity`, which already refused a second completion; strictest if it is ever missing.
+    let hub_check = prepared
+        .hub_check
+        .take()
+        .unwrap_or(HubCheck::NoExternalSenders);
     // The conservative retirement the caller already persisted; the fail-closed fallback if the precise
     // retirement cannot be built. Zeroizing so this in-process copy wipes on return.
 
@@ -1464,22 +1514,31 @@ pub fn complete_welcome_with(
     // Pin the configured hub credential BEFORE serializing the joined state, so a rejection never builds
     // (and then drops unwiped) a GroupState buffer. The retirement is already durable, so a rejection
     // travels back as a Spent for the caller to persist over the conservative one.
-    if let Some(expected_bytes) = expected_hub_entry {
-        let matches = match group.extensions().external_senders() {
-            Some(list) if list.len() == 1 => list[0]
-                .tls_serialize_detached()
-                .map(|actual| actual == expected_bytes)
-                .unwrap_or(false),
-            _ => false,
-        };
-        if !matches {
-            return Err(MimiWelcomeError::Spent {
-                retired_bundle,
-                reason:
-                    "joined group's external_senders does not match the expected hub credential"
-                        .to_string(),
-            });
+    let refusal = match &hub_check {
+        HubCheck::Unchecked => None,
+        HubCheck::NoExternalSenders => group
+            .extensions()
+            .external_senders()
+            .is_some_and(|list| !list.is_empty())
+            .then_some("the joined group names an external sender, and none was expected"),
+        HubCheck::Entry(expected_bytes) => {
+            let matches = match group.extensions().external_senders() {
+                Some(list) if list.len() == 1 => list[0]
+                    .tls_serialize_detached()
+                    .map(|actual| actual == *expected_bytes)
+                    .unwrap_or(false),
+                _ => false,
+            };
+            (!matches).then_some(
+                "joined group's external_senders does not match the expected hub credential",
+            )
         }
+    };
+    if let Some(reason) = refusal {
+        return Err(MimiWelcomeError::Spent {
+            retired_bundle,
+            reason: reason.to_string(),
+        });
     }
 
     // Move the joined-group storage into GroupState (mem::take leaves the wrapper empty; GroupState's

@@ -1612,3 +1612,72 @@ fn a_join_with_lapsed_leaf_is_refused_unless_lifetimes_are_skipped() {
     complete_welcome_with(prepared, crate::mls::JoinLifetimes::Skip)
         .expect("a join that skips lifetimes gets in");
 }
+
+/// Alice's group naming a hub as its one external sender, and the Welcome adding Bob, with Bob's bundle.
+fn welcome_into_a_group_with_an_external_sender(tag: &str) -> (Vec<u8>, Vec<u8>) {
+    let now = now_secs();
+    let (_, _, alice) =
+        crate::identity::generate_identity(format!("alice@{tag}.test"), now).expect("alice");
+    let (_, bob_kp, bob) =
+        crate::identity::generate_identity(format!("bob@{tag}.test"), now).expect("bob");
+    let (_, _, hub_bundle) =
+        crate::identity::generate_identity(format!("hub@{tag}.test"), now).expect("hub");
+    let (_, hub_pubkey) = raw_signer_and_pubkey(&hub_bundle);
+    let alice_s = mimi_create_group_with_external_senders(
+        format!("{tag}_group"),
+        alice.clone(),
+        hub_pubkey.as_slice().to_vec(),
+        format!("hub@{tag}.test"),
+    )
+    .expect("create group with external_senders");
+    let (_, welcome) = mimi_add_member(alice_s, alice, bob_kp).expect("add bob");
+    (welcome, bob)
+}
+
+/// A joiner that expects no external senders refuses a group that names one: the sender would get an external
+/// sender's standing (INV-MLS-001b) on a key the joiner never configured. The refusal comes after the spend, so it is
+/// `Spent`, carrying the retirement to persist.
+#[test]
+fn a_group_naming_an_external_sender_is_refused_when_none_is_expected() {
+    let (welcome, bob) = welcome_into_a_group_with_an_external_sender("pinnone");
+    let prepared = prepare_welcome_pinned(welcome, bob, ExternalSendersPin::NoExternalSenders)
+        .expect("nothing is refused before the join");
+    match complete_welcome(prepared) {
+        Err(MimiWelcomeError::Spent { reason, .. }) => assert!(
+            reason.contains("none was expected"),
+            "refused for its external sender: {reason}"
+        ),
+        other => panic!(
+            "PLANT-MIMI-PIN-NONE: a group naming an external sender was joined: {:?}",
+            other.map(|_| ())
+        ),
+    }
+}
+
+/// A group that names no external sender, as a MIMI-lane room, is joined when none is expected.
+#[test]
+fn a_group_naming_no_external_sender_is_joined_when_none_is_expected() {
+    let now = now_secs();
+    let (_, _, alice) =
+        crate::identity::generate_identity("alice@pinok.test".to_string(), now).expect("alice");
+    let (_, bob_kp, bob) =
+        crate::identity::generate_identity("bob@pinok.test".to_string(), now).expect("bob");
+    let alice_s = mimi_create_group("pinok_group".to_string(), alice.clone()).expect("create");
+    let (_, welcome) = mimi_add_member(alice_s, alice, bob_kp).expect("add bob");
+    let prepared = prepare_welcome_pinned(welcome, bob, ExternalSendersPin::NoExternalSenders)
+        .expect("prepare");
+    assert!(
+        complete_welcome(prepared).is_ok(),
+        "a group with no external sender is joined"
+    );
+}
+
+/// `prepare_welcome_retirement` with an empty key checks nothing, as before: a group naming an external sender is
+/// joined, which callers that check external senders themselves rely on.
+#[test]
+fn an_empty_hub_key_leaves_the_external_senders_unchecked() {
+    let (welcome, bob) = welcome_into_a_group_with_an_external_sender("pinempty");
+    let prepared =
+        prepare_welcome_retirement(welcome, bob, Vec::new(), String::new()).expect("prepare");
+    assert!(complete_welcome(prepared).is_ok());
+}
