@@ -18,7 +18,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use super::{member_index, validated_key_package};
-use crate::mls::pending::{open_group, staged, PendingCommit, WelcomeForm};
+use crate::mls::pending::{open_group, staged, staged_with_tree, PendingCommit, WelcomeForm};
 use crate::mls::{GroupState, IdentityBundle, MlsSigner};
 
 /// One change to a component that a commit carries.
@@ -336,6 +336,44 @@ pub fn mimi_commit_app_data_pending(
     resolve: Resolve<'_>,
     authenticated_data: Vec<u8>,
 ) -> anyhow::Result<PendingCommit> {
+    mimi_commit_app_data_bundle(
+        group_state_bytes,
+        bundle_bytes,
+        key_packages,
+        removals,
+        updates,
+        resolve,
+        authenticated_data,
+    )
+    .map(|bundle| bundle.pending)
+}
+
+/// A MIMI commit with what the room's hub takes beside it (draft-ietf-mimi-protocol §5.3 `HandshakeBundle`).
+#[derive(Debug)]
+pub struct MimiCommitBundle {
+    /// The commit, staged and not yet installed, as [`mimi_commit_app_data_pending`] makes it.
+    pub pending: PendingCommit,
+    /// The Welcome for added members, as the bare RFC 9420 `Welcome`, not wrapped in an `MLSMessage`.
+    pub welcome: Option<Vec<u8>>,
+    /// The `GroupInfo` for the epoch after the commit, signed by the committer, TLS-encoded and not wrapped in an
+    /// `MLSMessage`. It carries the ratchet tree extension and, as openmls puts in every `GroupInfo` it exports, the
+    /// group's external public key; the room's operational policy decides whether an external commit is accepted.
+    pub group_info: Vec<u8>,
+    /// The group's ratchet tree after the commit, TLS-encoded (`optional<Node> ratchet_tree<V>`).
+    pub ratchet_tree: Vec<u8>,
+}
+
+/// [`mimi_commit_app_data_pending`]'s commit, with the Welcome, `GroupInfo` and ratchet tree after it that the room's
+/// hub takes with it, from which a hub that does not yet track the room's tree starts tracking it.
+pub fn mimi_commit_app_data_bundle(
+    group_state_bytes: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+    key_packages: Vec<Vec<u8>>,
+    removals: Vec<String>,
+    updates: Vec<(u16, Vec<u8>)>,
+    resolve: Resolve<'_>,
+    authenticated_data: Vec<u8>,
+) -> anyhow::Result<MimiCommitBundle> {
     anyhow::ensure!(
         key_packages.len() <= crate::mls::groups::MAX_BULK_MEMBERS,
         "the commit adds more members than one commit may"
@@ -372,7 +410,7 @@ pub fn mimi_commit_app_data_pending(
         .collect();
     let changes = resolve_changes(stage.app_data_dictionary_updater(), &operations, resolve)?;
     stage.with_app_data_dictionary_updates(changes);
-    let (commit, welcome, _group_info) = stage
+    let messages = stage
         .build(
             opened.provider.rand(),
             opened.provider.crypto(),
@@ -381,14 +419,28 @@ pub fn mimi_commit_app_data_pending(
         )
         .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
         .stage_commit(&opened.provider)
-        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
-        .into_messages();
-    staged(
+        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?;
+    let bare_welcome = messages
+        .welcome()
+        .map(tls_codec::Serialize::tls_serialize_detached)
+        .transpose()?;
+    let group_info = messages
+        .group_info()
+        .ok_or_else(|| anyhow::anyhow!("the commit made no GroupInfo"))?
+        .tls_serialize_detached()?;
+    let (commit, welcome, _) = messages.into_messages();
+    let (pending, ratchet_tree) = staged_with_tree(
         opened,
         &commit,
         welcome.map(WelcomeForm::WithRatchetTree),
         &[],
-    )
+    )?;
+    Ok(MimiCommitBundle {
+        pending,
+        welcome: bare_welcome,
+        group_info,
+        ratchet_tree,
+    })
 }
 
 /// Leave a MIMI room: a Remove of this member's own leaf and an AppDataUpdate for each `(component, update)`, the

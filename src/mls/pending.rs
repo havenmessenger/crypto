@@ -770,6 +770,30 @@ pub(crate) fn staged(
     welcome: Option<WelcomeForm>,
     own_proposals: &[ProposalRef],
 ) -> anyhow::Result<PendingCommit> {
+    staged_with(opened, commit, welcome, own_proposals, false).map(|(pending, _)| pending)
+}
+
+/// [`staged`], and the group's ratchet tree after the commit, TLS-encoded: what a hub that tracks the group's tree
+/// needs with the commit.
+pub(crate) fn staged_with_tree(
+    opened: OpenedGroup,
+    commit: &MlsMessageOut,
+    welcome: Option<WelcomeForm>,
+    own_proposals: &[ProposalRef],
+) -> anyhow::Result<(PendingCommit, Vec<u8>)> {
+    let (pending, tree) = staged_with(opened, commit, welcome, own_proposals, true)?;
+    let tree =
+        tree.ok_or_else(|| anyhow::anyhow!("the successor's ratchet tree was not exported"))?;
+    Ok((pending, tree))
+}
+
+fn staged_with(
+    opened: OpenedGroup,
+    commit: &MlsMessageOut,
+    welcome: Option<WelcomeForm>,
+    own_proposals: &[ProposalRef],
+    successor_tree: bool,
+) -> anyhow::Result<(PendingCommit, Option<Vec<u8>>)> {
     let OpenedGroup {
         provider,
         group,
@@ -828,6 +852,9 @@ pub(crate) fn staged(
         "staged successor does not match its merge"
     );
     let summary = summarize(&group, &after).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let tree = successor_tree
+        .then(|| after.export_ratchet_tree().tls_serialize_detached())
+        .transpose()?;
     let welcome = match welcome {
         None => None,
         Some(WelcomeForm::Bare(welcome)) => Some(welcome.tls_serialize_detached()?),
@@ -845,21 +872,24 @@ pub(crate) fn staged(
         .iter()
         .map(TlsSerialize::tls_serialize_detached)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(PendingCommit {
-        predecessor_binding: binding(&group),
-        successor_binding,
-        group_id,
-        predecessor_epoch,
-        commit: commit_bytes,
-        welcome,
-        submission: None,
-        summary,
-        body: Body::Staged {
-            storage,
-            own_proposals,
-            restore,
+    Ok((
+        PendingCommit {
+            predecessor_binding: binding(&group),
+            successor_binding,
+            group_id,
+            predecessor_epoch,
+            commit: commit_bytes,
+            welcome,
+            submission: None,
+            summary,
+            body: Body::Staged {
+                storage,
+                own_proposals,
+                restore,
+            },
         },
-    })
+        tree,
+    ))
 }
 
 /// How to hand a caller's state back exactly as it was given: the digest of its bytes, and either the

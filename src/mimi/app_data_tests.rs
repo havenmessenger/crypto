@@ -830,3 +830,147 @@ fn a_summarized_commit_says_what_it_did() {
     );
     assert!(view.components.contains(&LIST), "{:?}", view.components);
 }
+
+/// Alice's new room, and her first commit's bundle: it adds Bob and puts him on the list.
+fn first_commit_bundle() -> (Vec<u8>, Vec<u8>, Vec<u8>, MimiCommitBundle) {
+    let (_, alice) = identity("alice");
+    let (bob_kp, bob) = identity("bob");
+    let room = mimi_create_group_app_data(
+        "room".into(),
+        alice.clone(),
+        vec![(LIST, b"alice".to_vec())],
+    )
+    .unwrap();
+    let bundle = mimi_commit_app_data_bundle(
+        room.clone(),
+        alice.clone(),
+        vec![bob_kp],
+        Vec::new(),
+        vec![(LIST, b"bob".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .unwrap();
+    (room, alice, bob, bundle)
+}
+
+/// The group a hub that tracks no tree yet builds from a bundle, as mimihubd's seeding does: the bare GroupInfo and the
+/// tree must make a valid public group.
+fn group_a_hub_builds(
+    bundle: &MimiCommitBundle,
+) -> (
+    openmls::group::PublicGroup,
+    openmls::messages::group_info::VerifiableGroupInfo,
+) {
+    let info = openmls::messages::group_info::VerifiableGroupInfo::tls_deserialize_exact(
+        bundle.group_info.as_slice(),
+    )
+    .expect("the GroupInfo decodes bare");
+    let tree = RatchetTreeIn::tls_deserialize_exact(bundle.ratchet_tree.as_slice())
+        .expect("the ratchet tree decodes");
+    let scratch = OpenMlsRustCrypto::default();
+    let (group, _) = openmls::group::PublicGroup::from_external(
+        scratch.crypto(),
+        scratch.storage(),
+        tree,
+        info.clone(),
+        ProposalStore::new(),
+    )
+    .expect("PLANT-MIMI-BUNDLE-TREE: the GroupInfo and the tree make a valid group");
+    (group, info)
+}
+
+/// What a room's hub needs from the creator's first commit to start tracking the room: a GroupInfo for the epoch after
+/// the commit, signed by the committer, and the tree after it, which together make a valid group, the same group the
+/// committer installs once the hub accepts the commit. The commit itself is a PublicMessage, which the hub can read.
+#[test]
+fn the_first_commit_carries_what_a_hub_tracks_the_room_from() {
+    let (room, alice, _, bundle) = first_commit_bundle();
+    let (hub_group, info) = group_a_hub_builds(&bundle);
+    assert_eq!(
+        info.group_context().epoch().as_u64(),
+        bundle.pending.predecessor_epoch() + 1,
+        "the GroupInfo is for the epoch after the commit"
+    );
+    let signer = hub_group
+        .members()
+        .find(|member| member.index == info.signer())
+        .expect("the GroupInfo's signer is a member");
+    assert_eq!(
+        signer.credential.serialized_content(),
+        b"mimi://hub.example/u/alice",
+        "the committer signed the GroupInfo"
+    );
+    let message = MlsMessageIn::tls_deserialize_exact(bundle.pending.commit()).unwrap();
+    assert!(
+        matches!(message.extract(), MlsMessageBodyIn::PublicMessage(_)),
+        "the commit is a PublicMessage"
+    );
+
+    let ratchet_tree = bundle.ratchet_tree.clone();
+    let installed = confirm(bundle.pending, &room);
+    let opened = open_group(installed, alice).unwrap();
+    assert_eq!(
+        hub_group.group_context(),
+        opened.group.export_group_context(),
+        "the hub's group is the one the committer installs"
+    );
+    assert_eq!(
+        ratchet_tree,
+        opened
+            .group
+            .export_ratchet_tree()
+            .tls_serialize_detached()
+            .unwrap(),
+        "PLANT-MIMI-BUNDLE-SUCCESSOR-TREE: the tree is the one after the commit"
+    );
+}
+
+/// The bundle's Welcome is the bare RFC 9420 Welcome. A hub delivers it wrapped as an MLSMessage, with no tree beside
+/// it, and the added member joins from that alone, since the Welcome's GroupInfo carries the tree.
+#[test]
+fn an_added_member_joins_from_the_bare_welcome_a_hub_delivers() {
+    let (room, _, bob, bundle) = first_commit_bundle();
+    let bare = bundle.welcome.clone().expect("an add has a Welcome");
+    Welcome::tls_deserialize_exact(bare.as_slice()).expect(
+        "PLANT-MIMI-BUNDLE-BARE-WELCOME: the Welcome is bare, not an MLSMessage or Haven's pair",
+    );
+    // What a hub queues for the member: the MLSMessage header (mls10, welcome) and the bare Welcome.
+    let delivered = [&[0x00, 0x01, 0x00, 0x03][..], bare.as_slice()].concat();
+    let alice_state = confirm(bundle.pending, &room);
+    let bob_state = join(&delivered, bob);
+    assert_eq!(list(&bob_state), b"alice,bob");
+    assert_eq!(list(&alice_state), b"alice,bob");
+}
+
+/// openmls puts the group's external public key in every GroupInfo it exports, this one included. Whether a room
+/// accepts an external commit is its operational policy's, which its hub enforces; this pins what is sent.
+#[test]
+fn the_groupinfo_carries_the_external_public_key() {
+    let (_, _, _, bundle) = first_commit_bundle();
+    let (_, info) = group_a_hub_builds(&bundle);
+    assert!(info.extensions().external_pub().is_some());
+}
+
+/// A commit that adds nobody still carries a GroupInfo and the tree, and no Welcome.
+#[test]
+fn a_commit_without_an_add_carries_the_groupinfo_and_tree_and_no_welcome() {
+    let (room, alice, _, bundle) = first_commit_bundle();
+    let alice_state = confirm(bundle.pending, &room);
+    let next = mimi_commit_app_data_bundle(
+        alice_state,
+        alice,
+        Vec::new(),
+        Vec::new(),
+        vec![(LIST, b"dana".to_vec())],
+        &append,
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(next.welcome.is_none());
+    let (_, info) = group_a_hub_builds(&next);
+    assert_eq!(
+        info.group_context().epoch().as_u64(),
+        next.pending.predecessor_epoch() + 1
+    );
+}

@@ -5,6 +5,12 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- `mimi::app_data::mimi_commit_app_data_bundle`: a MIMI commit with what the room's hub takes beside it
+  (draft-ietf-mimi-protocol §5.3 `HandshakeBundle`): the bare Welcome for added members, the committer-signed
+  `GroupInfo` for the epoch after the commit (TLS, no `MLSMessage` wrap), and the ratchet tree after it, from which a hub
+  that does not yet track the room's tree starts tracking it. The `GroupInfo` carries the external public key, as
+  openmls puts in every `GroupInfo` it exports. `mimi_commit_app_data_pending` is the same commit without them; its
+  output is unchanged.
 - `hpke-rs` 0.8 (from 0.7), the version openmls builds on, so the crate links one HPKE stack. Targeted messages and
   the reader seal build their HPKE context with `try_new`: if the system's randomness can't be had, the operation is
   refused with its usual error instead of panicking. Their wire output is unchanged; the stored vectors still match
