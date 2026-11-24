@@ -389,6 +389,9 @@ pub(crate) fn decrypt_in(
 
     let content = match processed_message.into_content() {
         ProcessedMessageContent::ApplicationMessage(app_msg) => app_msg.into_bytes(),
+        // Anything else is refused here, commits included. With the `mimi-app-data` feature, openmls hands back a
+        // commit covering AppDataUpdate proposals unvalidated (`UnresolvedAppDataCommit`); it is never resolved on
+        // this native path (INV-MIMI-003).
         _ => return Err(anyhow::anyhow!("Not an application message")),
     };
 
@@ -1056,6 +1059,11 @@ pub fn mls_process_commit(
                 .merge_staged_commit(&provider, *staged)
                 .map_err(|e| anyhow::anyhow!("Error merging staged commit: {:?}", e))?;
         }
+        // Only a staged commit is applied. With the `mimi-app-data` feature, openmls returns a commit covering
+        // AppDataUpdate proposals without validating it (`UnresolvedAppDataCommit`), for the application to
+        // resolve. Resolving one is the MIMI lane's job and never a native group's. In that build this refusal is
+        // the only thing that keeps a native group from taking an app data change (INV-MIMI-003), so it must stay
+        // a refusal.
         _ => {
             return Err(anyhow::anyhow!(
                 "Expected a Commit, got a different message type"
