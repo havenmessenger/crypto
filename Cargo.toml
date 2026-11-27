@@ -31,6 +31,10 @@ mimi-app-data = [
     "openmls_rust_crypto/extensions-draft",
     "openmls_traits/extensions-draft",
 ]
+# The did_webvh MLS credential (draft-atwood-mls-didwebvh-credential): its log verification and group rules, from the
+# draft's reference crate. The group rules keep their record in the app data dictionary, so this needs mimi-app-data.
+# Off by default.
+did-webvh = ["dep:mls-didwebvh", "mimi-app-data"]
 
 [dependencies]
 anyhow = "1.0.100"
@@ -68,6 +72,14 @@ subtle = "2"
 hpke-rs = { version = "=0.8.0", default-features = false, features = ["hazmat", "serialization"] }
 hpke-rs-crypto = "=0.8.0"
 hpke-rs-rust-crypto = "=0.8.0"
+# The did_webvh credential's reference crate. It is not released on crates.io yet, so it is taken from its repository
+# at one exact revision; the manifest-purity guard allows that one crate from there and nothing else.
+mls-didwebvh = { git = "https://github.com/MarkAtwood/mimid", rev = "7089317472af8ac5c1da05e36dd8f071e6c32256", optional = true }
+
+# mls-didwebvh names its did:webvh verifier by a git revision; that revision's source is the same as the crates.io
+# release, which is taken instead, so the lock holds no git source for it.
+[patch."https://github.com/MarkAtwood/crate-jmap"]
+jmap-did-types = "=0.6.2"
 
 [profile.release]
 lto = "thin"

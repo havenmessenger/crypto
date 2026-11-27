@@ -52,6 +52,16 @@ jobs:
         # The feature turns on openmls's extensions draft, which adds enum variants and changes how openmls marks a
         # last-resort KeyPackage, so the crate is linted and tested in that state too.
         run: cargo clippy --lib --features mimi-app-data -- -D warnings && cargo test --features mimi-app-data
+      - name: clippy and test with did-webvh
+        # The did_webvh credential (with mimi-app-data, which it needs) is linted and tested in its own state.
+        run: cargo clippy --lib --features did-webvh -- -D warnings && cargo test --features did-webvh
+      - name: a default build carries no did_webvh dependency
+        # A consumer that does not turn on did-webvh builds none of mls-didwebvh or its verifier.
+        run: |
+          if cargo tree -e normal --prefix none | grep -E '^(mls-didwebvh|jmap-did-types|jmap-types) '; then
+            echo "a default build pulls in a did_webvh dependency" >&2
+            exit 1
+          fi
 
   secrets:
     # The same gitleaks version as the pre-commit hook, with .gitleaks.toml, over the checked-out tree. The release

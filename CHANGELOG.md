@@ -5,6 +5,14 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- A `did-webvh` feature, off by default: it brings in `mls-didwebvh`, the reference crate of the did_webvh MLS
+  credential (draft-atwood-mls-didwebvh-credential), for its log verification and group rules, and turns on
+  `mimi-app-data`, where those rules keep their record. Nothing uses it yet. The crate is taken from its repository at
+  one exact revision, the revision the interop hub uses, so a client and a hub validate a credential the same way; its
+  did:webvh verifier comes from its crates.io release. A build without the feature carries none of it, which CI checks.
+  The manifest-purity guard allows that one crate from that repository, and now also refuses a second revision of
+  OpenMLS or of `mls-didwebvh`. `serde`, `serde_json` and `thiserror` move to the patch releases the crate requires.
+
 - A member's renewed leaf keeps its credential identity (RFC 9420 §5.3.1, a valid successor). The commit receive paths
   (`mls::groups::mls_process_commit`, `mimi::mls_process_commit_appsync` and its variants, and
   `mimi::app_data::mimi_process_commit_app_data`) refuse a commit, before it is merged, whose UpdatePath leaf, or an
