@@ -31,6 +31,17 @@ mimi-app-data = [
     "openmls_rust_crypto/extensions-draft",
     "openmls_traits/extensions-draft",
 ]
+# Virtual clients (draft-ietf-mls-virtual-clients): emulation groups, derivation epochs, and commits a virtual client's
+# emulators make for it. Under it openmls creates every message unconfirmed; this crate confirms each one as it creates
+# it, which is right while one emulator sends for each leaf (src/mls/single_sender.rs). openmls's draft turns on its
+# extensions draft too, so this turns on mimi-app-data. Off by default, so a build without it carries none of
+# openmls's virtual-clients draft.
+virtual-clients = [
+    "mimi-app-data",
+    "openmls/virtual-clients-draft",
+    "openmls_rust_crypto/virtual-clients-draft",
+    "openmls_traits/virtual-clients-draft",
+]
 # The did_webvh MLS credential (draft-atwood-mls-didwebvh-credential): its log verification and group rules, from the
 # draft's reference crate. The group rules keep their record in the app data dictionary, so this needs mimi-app-data.
 # Off by default.
@@ -75,6 +86,12 @@ hpke-rs-rust-crypto = "=0.8.0"
 # The did_webvh credential's reference crate. It is not released on crates.io yet, so it is taken from its repository
 # at one exact revision; the manifest-purity guard allows that one crate from there and nothing else.
 mls-didwebvh = { git = "https://github.com/MarkAtwood/mimid", rev = "7089317472af8ac5c1da05e36dd8f071e6c32256", optional = true }
+
+[dev-dependencies]
+# Tests drive other group members with openmls's own convenience methods. Under the virtual-clients feature openmls
+# compiles those out except with its test-utils; turned on here, for test builds only, it does not reach a library
+# build, whose sends go through src/mls/single_sender.rs.
+openmls = { git = "https://github.com/openmls/openmls", rev = "ba267737b9511e538a77a41f4480fbed28ff4e83", features = ["js", "test-utils"] }
 
 # mls-didwebvh names its did:webvh verifier by a git revision; that revision's source is the same as the crates.io
 # release, which is taken instead, so the lock holds no git source for it.

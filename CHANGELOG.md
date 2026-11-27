@@ -5,6 +5,20 @@ anything else. There is no API-stability guarantee before 1.0 (see the README).
 
 ## Unreleased
 
+- A `virtual-clients` feature, off by default, turning on openmls's virtual-clients draft (and `mimi-app-data`, since
+  the draft needs openmls's extensions draft). Under the draft openmls creates every message and commit unconfirmed
+  and offers no call that sends without that step, so with the feature each of this crate's sends and commits is
+  confirmed as it is created (`mls::single_sender`), keeping no secret beyond the call. That is what a build without
+  the feature does, and it is correct while exactly one emulator sends for each virtual-client leaf; an application
+  with several sending emulators per leaf must confirm only after the delivery service accepts. A build without the
+  feature is unchanged: its sends are openmls's own methods, and CI checks that it turns on none of the draft, and
+  that no library build turns on openmls's `test-utils`, which the crate's tests use. Commit refusals caused by the
+  draft (`VirtualClientsError`, `MalformedVcCommitData`, a derivation epoch that does not register) map to `Other`.
+- For a consumer that turns on `did-webvh`: the `[patch]` that takes `jmap-did-types` from crates.io applies only
+  where this crate is the workspace root. A workspace that depends on this crate and turns the feature on needs the
+  same `[patch."https://github.com/MarkAtwood/crate-jmap"]` entry in its own root manifest, or that crate comes from
+  its git repository.
+
 - A `did-webvh` feature, off by default: it brings in `mls-didwebvh`, the reference crate of the did_webvh MLS
   credential (draft-atwood-mls-didwebvh-credential), for its log verification and group rules, and turns on
   `mimi-app-data`, where those rules keep their record. Nothing uses it yet. The crate is taken from its repository at

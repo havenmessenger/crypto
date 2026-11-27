@@ -99,6 +99,8 @@ pub fn rotate_signer_pending(
         .map_err(|e| anyhow::anyhow!("Error building the rotation commit: {e:?}"))?
         .stage_commit(&opened.provider)
         .map_err(|e| anyhow::anyhow!("Error staging the rotation commit: {e:?}"))?;
+    #[cfg(feature = "virtual-clients")]
+    crate::mls::single_sender::confirm_commit(&mut opened.group, &opened.provider, &bundle)?;
     let (commit, _welcome, _group_info) = bundle.into_messages();
     staged(opened, &commit, None, &[])
 }

@@ -420,6 +420,8 @@ pub fn mimi_commit_app_data_bundle(
         .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
         .stage_commit(&opened.provider)
         .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    crate::mls::single_sender::confirm_commit(&mut opened.group, &opened.provider, &messages)?;
     let bare_welcome = messages
         .welcome()
         .map(tls_codec::Serialize::tls_serialize_detached)
@@ -455,13 +457,19 @@ pub fn mimi_leave_app_data(
     let mut opened = open_group(group_state_bytes, bundle_bytes)?;
     let mut proposals = Vec::with_capacity(updates.len() + 1);
     opened.group.set_aad(authenticated_data.clone());
+    #[cfg(not(feature = "virtual-clients"))]
     let remove = opened
         .group
         .leave_group(&opened.provider, &opened.signer)
         .map_err(|e| anyhow::anyhow!("Error proposing the leave: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let remove =
+        crate::mls::single_sender::leave_group(&mut opened.group, &opened.provider, &opened.signer)
+            .map_err(|e| anyhow::anyhow!("Error proposing the leave: {:?}", e))?;
     proposals.push(remove.tls_serialize_detached()?);
     for (component, update) in updates {
         opened.group.set_aad(authenticated_data.clone());
+        #[cfg(not(feature = "virtual-clients"))]
         let (proposal, _) = opened
             .group
             .propose_app_data_update(
@@ -471,6 +479,15 @@ pub fn mimi_leave_app_data(
                 AppDataUpdateOperation::Update(update.into()),
             )
             .map_err(|e| anyhow::anyhow!("Error proposing the app data update: {:?}", e))?;
+        #[cfg(feature = "virtual-clients")]
+        let (proposal, _) = crate::mls::single_sender::propose_app_data_update(
+            &mut opened.group,
+            &opened.provider,
+            &opened.signer,
+            component,
+            AppDataUpdateOperation::Update(update.into()),
+        )
+        .map_err(|e| anyhow::anyhow!("Error proposing the app data update: {:?}", e))?;
         proposals.push(proposal.tls_serialize_detached()?);
     }
     let state = GroupState {

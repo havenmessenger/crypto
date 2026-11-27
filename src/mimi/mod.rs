@@ -313,10 +313,19 @@ pub fn mimi_add_member_commit_pending(
 
     // INV-MLS-002 explicit accept-gate (MIMI foreign-ingest): refuse a foreign-suite KeyPackage.
     crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, welcome, _group_info) = opened
         .group
         .add_members(&opened.provider, &opened.signer, &[validated_kp])
         .map_err(|e| anyhow::anyhow!("Error adding member: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, welcome, _group_info) = crate::mls::single_sender::add_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &[validated_kp],
+    )
+    .map_err(|e| anyhow::anyhow!("Error adding member: {:?}", e))?;
     staged(opened, &commit, Some(WelcomeForm::Bare(welcome)), &[])
 }
 
@@ -355,10 +364,19 @@ pub fn mimi_remove_member_commit_pending(
                 credential_identity
             )
         })?;
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, _welcome, _group_info) = opened
         .group
         .remove_members(&opened.provider, &opened.signer, &[target_index])
         .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, _welcome, _group_info) = crate::mls::single_sender::remove_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &[target_index],
+    )
+    .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
     staged(opened, &commit, None, &[])
 }
 
@@ -405,10 +423,19 @@ pub fn mimi_remove_member_commit_by_leaf_index_pending(
         hex::encode_upper(&target.signature_key) == expected_signature_key.to_ascii_uppercase(),
         "MLS leaf index {leaf_index} does not carry the expected signature key"
     );
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, _welcome, _group_info) = opened
         .group
         .remove_members(&opened.provider, &opened.signer, &[target_index])
         .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, _welcome, _group_info) = crate::mls::single_sender::remove_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &[target_index],
+    )
+    .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
     staged(opened, &commit, None, &[])
 }
 
@@ -537,7 +564,7 @@ pub fn mimi_accept_external_remove_proposal_pending(
     // sweep-all-pending-into-next-commit behavior, which would otherwise auto-commit any OTHER
     // proposal sitting in the pending store alongside this one - unvalidated by the checks above.
     // Only this ONE validated, type-checked, sender-checked proposal is added to the commit.
-    let (commit, _welcome, _group_info) = opened
+    let bundle = opened
         .group
         .commit_builder()
         .consume_proposal_store(false)
@@ -552,8 +579,10 @@ pub fn mimi_accept_external_remove_proposal_pending(
         )
         .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
         .stage_commit(&opened.provider)
-        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
-        .into_messages();
+        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    crate::mls::single_sender::confirm_commit(&mut opened.group, &opened.provider, &bundle)?;
+    let (commit, _welcome, _group_info) = bundle.into_messages();
     staged(opened, &commit, None, &[])
 }
 
@@ -663,13 +692,22 @@ pub fn mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
     // ALSO inlines the Add by value (commit builder `propose_adds`) - both BY VALUE so the receiver can
     // process the commit without needing the proposals separately (atomicity: one commit, not two).
     let custom = CustomProposal::new(MIMI_PARTICIPANT_LIST_PROPOSAL_TYPE, roster_payload);
+    #[cfg(not(feature = "virtual-clients"))]
     let (_proposal, roster_ref) = opened
         .group
         .propose_custom_proposal_by_value(&opened.provider, &opened.signer, custom)
         .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (_proposal, roster_ref) = crate::mls::single_sender::propose_custom_proposal_by_value(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        custom,
+    )
+    .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
     // Set after the roster proposal, which would otherwise consume it: the commit is the message that carries it.
     opened.group.set_aad(authenticated_data);
-    let (commit, welcome, _gi) = opened
+    let bundle = opened
         .group
         .commit_builder()
         .consume_proposal_store(true) // include the pending roster custom proposal
@@ -684,8 +722,10 @@ pub fn mimi_add_members_bulk_commit_appsync_pending_with_authenticated_data(
         )
         .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
         .stage_commit(&opened.provider)
-        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
-        .into_messages();
+        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    crate::mls::single_sender::confirm_commit(&mut opened.group, &opened.provider, &bundle)?;
+    let (commit, welcome, _gi) = bundle.into_messages();
     let welcome = welcome.ok_or_else(|| anyhow::anyhow!("Add commit produced no Welcome"))?;
     // The post-commit ratchet tree travels with the Welcome explicitly rather than through
     // use_ratchet_tree_extension: the persisted/reloaded group configuration may not retain that
@@ -750,13 +790,22 @@ pub fn mimi_remove_member_commit_appsync_pending_with_authenticated_data(
     // Stage the roster custom proposal, then build ONE commit inlining the Remove by value
     // (atomicity: one commit, not two).
     let custom = CustomProposal::new(MIMI_PARTICIPANT_LIST_PROPOSAL_TYPE, roster_payload);
+    #[cfg(not(feature = "virtual-clients"))]
     let (_proposal, roster_ref) = opened
         .group
         .propose_custom_proposal_by_value(&opened.provider, &opened.signer, custom)
         .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (_proposal, roster_ref) = crate::mls::single_sender::propose_custom_proposal_by_value(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        custom,
+    )
+    .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
     // Set after the roster proposal, which would otherwise consume it: the commit is the message that carries it.
     opened.group.set_aad(authenticated_data);
-    let (commit, _welcome, _gi) = opened
+    let bundle = opened
         .group
         .commit_builder()
         .consume_proposal_store(true) // include the pending roster custom proposal
@@ -771,8 +820,10 @@ pub fn mimi_remove_member_commit_appsync_pending_with_authenticated_data(
         )
         .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
         .stage_commit(&opened.provider)
-        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
-        .into_messages();
+        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    crate::mls::single_sender::confirm_commit(&mut opened.group, &opened.provider, &bundle)?;
+    let (commit, _welcome, _gi) = bundle.into_messages();
     staged(opened, &commit, None, &[roster_ref])
 }
 
@@ -794,13 +845,22 @@ pub fn mimi_replace_member_commit_appsync_pending_with_authenticated_data(
     let validated_kp = validated_key_package(&opened, &key_package_bytes)?;
 
     let custom = CustomProposal::new(MIMI_PARTICIPANT_LIST_PROPOSAL_TYPE, roster_payload);
+    #[cfg(not(feature = "virtual-clients"))]
     let (_proposal, roster_ref) = opened
         .group
         .propose_custom_proposal_by_value(&opened.provider, &opened.signer, custom)
         .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (_proposal, roster_ref) = crate::mls::single_sender::propose_custom_proposal_by_value(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        custom,
+    )
+    .map_err(|e| anyhow::anyhow!("Error proposing roster: {:?}", e))?;
     // Set after the roster proposal, which would otherwise consume it: the commit is the message that carries it.
     opened.group.set_aad(authenticated_data);
-    let (commit, welcome, _gi) = opened
+    let bundle = opened
         .group
         .commit_builder()
         .consume_proposal_store(true) // include the pending roster custom proposal
@@ -816,8 +876,10 @@ pub fn mimi_replace_member_commit_appsync_pending_with_authenticated_data(
         )
         .map_err(|e| anyhow::anyhow!("Error building commit: {:?}", e))?
         .stage_commit(&opened.provider)
-        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?
-        .into_messages();
+        .map_err(|e| anyhow::anyhow!("Error staging commit: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    crate::mls::single_sender::confirm_commit(&mut opened.group, &opened.provider, &bundle)?;
+    let (commit, welcome, _gi) = bundle.into_messages();
     let welcome = welcome.ok_or_else(|| anyhow::anyhow!("Replace commit produced no Welcome"))?;
     staged(
         opened,

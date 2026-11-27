@@ -15,6 +15,8 @@ pub mod own_message;
 pub mod pending;
 pub mod processing_error;
 pub mod rotation;
+#[cfg(feature = "virtual-clients")]
+pub(crate) mod single_sender;
 pub mod store;
 pub mod stored;
 pub mod targeted;

@@ -313,8 +313,12 @@ pub(crate) fn encrypt_in(
         .map_err(|e| anyhow::anyhow!("Error loading group: {:?}", e))?
         .ok_or_else(|| anyhow::anyhow!("Group not found in storage"))?;
 
+    #[cfg(not(feature = "virtual-clients"))]
     let message = group
         .create_message(provider, &signer, message)
+        .map_err(|e| anyhow::anyhow!("Encryption error: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let message = crate::mls::single_sender::create_message(&mut group, provider, &signer, message)
         .map_err(|e| anyhow::anyhow!("Encryption error: {:?}", e))?;
 
     Ok(message.tls_serialize_detached()?)
@@ -442,10 +446,19 @@ pub fn add_member_pending(
     // INV-MLS-002 explicit accept-gate: refuse a foreign-suite KeyPackage before openmls HPKE-seals
     // the Welcome to it. validate() above is signature-only (no AEAD); this gates the suite.
     crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, welcome, _group_info) = opened
         .group
         .add_members(&opened.provider, &opened.signer, &[validated_kp])
         .map_err(|e| anyhow::anyhow!("Error adding member: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, welcome, _group_info) = crate::mls::single_sender::add_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &[validated_kp],
+    )
+    .map_err(|e| anyhow::anyhow!("Error adding member: {:?}", e))?;
     staged(
         opened,
         &commit,
@@ -464,6 +477,7 @@ pub fn self_update_pending(
     bundle_bytes: Vec<u8>,
 ) -> anyhow::Result<PendingCommit> {
     let mut opened = open_group(group_state_bytes, bundle_bytes)?;
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, _welcome, _group_info) = opened
         .group
         .self_update(
@@ -473,6 +487,15 @@ pub fn self_update_pending(
         )
         .map_err(|e| anyhow::anyhow!("Error updating own leaf: {:?}", e))?
         .into_messages();
+    #[cfg(feature = "virtual-clients")]
+    let (commit, _welcome, _group_info) = crate::mls::single_sender::self_update(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        LeafNodeParameters::default(),
+    )
+    .map_err(|e| anyhow::anyhow!("Error updating own leaf: {:?}", e))?
+    .into_messages();
     staged(opened, &commit, None, &[])
 }
 
@@ -536,10 +559,19 @@ pub fn add_members_bulk_pending(
         crate::suite_policy::gate_inbound_keypackage(&validated_kp)?;
         validated_kps.push(validated_kp);
     }
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, welcome, _group_info) = opened
         .group
         .add_members(&opened.provider, &opened.signer, &validated_kps)
         .map_err(|e| anyhow::anyhow!("Error adding members: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, welcome, _group_info) = crate::mls::single_sender::add_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &validated_kps,
+    )
+    .map_err(|e| anyhow::anyhow!("Error adding members: {:?}", e))?;
     staged(
         opened,
         &commit,
@@ -590,10 +622,19 @@ pub fn remove_member_by_credential_pending(
                 credential_identity
             )
         })?;
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, _welcome, _group_info) = opened
         .group
         .remove_members(&opened.provider, &opened.signer, &[target_index])
         .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, _welcome, _group_info) = crate::mls::single_sender::remove_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &[target_index],
+    )
+    .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
     staged(opened, &commit, None, &[])
 }
 
@@ -640,10 +681,19 @@ pub fn remove_member_by_leaf_index_pending(
         hex::encode_upper(&target.signature_key) == expected_signature_key.to_ascii_uppercase(),
         "MLS leaf index {leaf_index} does not carry the expected signature key"
     );
+    #[cfg(not(feature = "virtual-clients"))]
     let (commit, _welcome, _group_info) = opened
         .group
         .remove_members(&opened.provider, &opened.signer, &[target_index])
         .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
+    #[cfg(feature = "virtual-clients")]
+    let (commit, _welcome, _group_info) = crate::mls::single_sender::remove_members(
+        &mut opened.group,
+        &opened.provider,
+        &opened.signer,
+        &[target_index],
+    )
+    .map_err(|e| anyhow::anyhow!("Error removing member: {:?}", e))?;
     staged(opened, &commit, None, &[])
 }
 

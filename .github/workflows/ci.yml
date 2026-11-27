@@ -55,6 +55,24 @@ jobs:
       - name: clippy and test with did-webvh
         # The did_webvh credential (with mimi-app-data, which it needs) is linted and tested in its own state.
         run: cargo clippy --lib --features did-webvh -- -D warnings && cargo test --features did-webvh
+      - name: clippy and test with virtual-clients
+        # Under openmls's virtual-clients draft every send goes through src/mls/single_sender.rs; lint and test that
+        # state, alone and with did-webvh.
+        run: |
+          cargo clippy --lib --features virtual-clients -- -D warnings && cargo test --features virtual-clients
+          cargo clippy --lib --features virtual-clients,did-webvh -- -D warnings
+      - name: a default build carries no virtual-clients draft, and no library build openmls's test-utils
+        # The default build's sends are openmls's own convenience methods, as before the feature existed; test-utils,
+        # which brings those methods back under the draft, is for this crate's tests only.
+        run: |
+          if cargo tree -e normal,features -i openmls | grep -q 'virtual-clients-draft'; then
+            echo "a default build turns on openmls's virtual-clients draft" >&2
+            exit 1
+          fi
+          if cargo tree -e normal,features -i openmls --features virtual-clients,did-webvh | grep -q 'test-utils'; then
+            echo "a library build turns on openmls's test-utils" >&2
+            exit 1
+          fi
       - name: a default build carries no did_webvh dependency
         # A consumer that does not turn on did-webvh builds none of mls-didwebvh or its verifier.
         run: |

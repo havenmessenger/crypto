@@ -169,7 +169,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -306,6 +306,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26b07d673db1ccf000e90f54b819db9e75a8348d6eb056e9b8ab53231b7a9911"
 dependencies = [
  "cipher 0.4.4",
+]
+
+[[package]]
+name = "cbc"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2dc9ee5f88d11e0beb842c88b33c8a5cf0d1329c4b19494af42b07dbfe8896"
+dependencies = [
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -1110,6 +1119,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "fpe"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5045d51a6a5e85e0a18d909eedd270c4d82ad634fee57ba707692fb3b1add5a7"
+dependencies = [
+ "cbc",
+ "cipher 0.5.2",
+ "libm",
+ "num-bigint 0.5.1",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1231,7 +1254,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a33cb227f97ee5c419064c31d7c55a7d895f28d8019ccdadc311cc036500c4"
 dependencies = [
  "hax-lib-macros 0.3.7",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
 ]
 
@@ -1242,7 +1265,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb3bfcfc915e894c331662e4ac76706b777a5956535ea24535f4df30da04b1bf"
 dependencies = [
  "hax-lib-macros 0.4.2",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
 ]
 
@@ -1302,6 +1325,9 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hex-conservative"
@@ -1668,6 +1694,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1823,6 +1858,29 @@ dependencies = [
  "libcrux-p256",
  "rand 0.10.2",
  "tls_codec",
+]
+
+[[package]]
+name = "libcrux-ecdsa"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71554ed1831885ed1c972993cd022ef17dcb5eeb0560610326a6a268c0ed02b9"
+dependencies = [
+ "libcrux-p256",
+ "libcrux-sha2",
+ "rand 0.10.2",
+]
+
+[[package]]
+name = "libcrux-ed25519"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55de36c252a9fd97a202c03535deecbe988c525eb16901b2ea17ed99e737edc9"
+dependencies = [
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+ "libcrux-sha2",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2108,6 +2166,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2206,12 +2274,20 @@ version = "0.9.0"
 source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83"
 dependencies = [
  "getrandom 0.4.3",
+ "itertools 0.15.0",
  "log",
+ "openmls_basic_credential",
+ "openmls_libcrux_crypto",
+ "openmls_memory_storage",
+ "openmls_rust_crypto",
  "openmls_serialization_helpers",
+ "openmls_test",
  "openmls_traits",
+ "rand 0.10.2",
  "rayon",
  "serde",
  "serde_bytes",
+ "serde_json",
  "thiserror 2.0.21",
  "tls_codec",
  "web-time",
@@ -2219,10 +2295,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "openmls_basic_credential"
+version = "0.6.0"
+source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83"
+dependencies = [
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
+ "openmls_traits",
+ "p256 0.14.0",
+ "p384 0.14.0",
+ "rand_core 0.10.1",
+ "serde",
+ "tls_codec",
+ "zeroize",
+]
+
+[[package]]
+name = "openmls_libcrux_crypto"
+version = "0.4.0"
+source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83"
+dependencies = [
+ "aes 0.9.4",
+ "fpe",
+ "hpke-rs",
+ "hpke-rs-crypto",
+ "hpke-rs-libcrux",
+ "libcrux-aead",
+ "libcrux-ecdsa",
+ "libcrux-ed25519",
+ "libcrux-hkdf",
+ "libcrux-hmac",
+ "libcrux-hmac-drbg",
+ "libcrux-sha2",
+ "libcrux-traits",
+ "openmls_memory_storage",
+ "openmls_traits",
+ "rand 0.10.2",
+ "tls_codec",
+]
+
+[[package]]
 name = "openmls_memory_storage"
 version = "0.6.0"
 source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83"
 dependencies = [
+ "hex",
  "log",
  "openmls_traits",
  "serde",
@@ -2235,9 +2352,11 @@ name = "openmls_rust_crypto"
 version = "0.6.0"
 source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83"
 dependencies = [
+ "aes 0.9.4",
  "aes-gcm 0.11.1",
  "chacha20poly1305",
  "ed25519-dalek 3.0.0",
+ "fpe",
  "getrandom 0.4.3",
  "hkdf 0.13.0",
  "hmac 0.13.0",
@@ -2264,6 +2383,17 @@ dependencies = [
  "quote",
  "syn 3.0.10",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "openmls_test"
+version = "0.3.0"
+source = "git+https://github.com/openmls/openmls?rev=ba267737b9511e538a77a41f4480fbed28ff4e83#ba267737b9511e538a77a41f4480fbed28ff4e83"
+dependencies = [
+ "openmls_rust_crypto",
+ "openmls_traits",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]

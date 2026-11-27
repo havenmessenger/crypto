@@ -164,6 +164,12 @@ const fn of_staging(refusal: &StageCommitError) -> CommitRefusalReason {
         #[cfg(feature = "mimi-app-data")]
         StageCommitError::AppDataUpdateValidationError(_)
         | StageCommitError::ApplyAppDataUpdateError(_) => Other,
+        // A virtual-client commit this member cannot follow: for example one made from a derivation epoch it does not
+        // hold, as an emulator removed from its emulation group meets.
+        #[cfg(feature = "virtual-clients")]
+        StageCommitError::VirtualClientsError(_) | StageCommitError::MalformedVcCommitData(_) => {
+            Other
+        }
     }
 }
 
@@ -235,6 +241,8 @@ const fn of_merging<S>(refusal: &MergeCommitError<S>) -> CommitRefusalReason {
         MergeCommitError::LibraryError(_) | MergeCommitError::StorageError(_) => {
             CommitRefusalReason::Other
         }
+        #[cfg(feature = "virtual-clients")]
+        MergeCommitError::RegisterVcDerivationEpoch(_) => CommitRefusalReason::Other,
     }
 }
 
